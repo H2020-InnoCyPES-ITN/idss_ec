@@ -1,0 +1,14 @@
+# Runtime output from local peer launches
+/server/idss_server
+/server/logs/
+/server/idss_graph_db/
+/server/heap_before_init.pprof
+/server/heap_after_init.pprof
+
+# Client and experiment output
+/client/results/
+/experiments/results/
+
+# Generated Python bytecode
+server/__pycache__/
+*.py[cod]

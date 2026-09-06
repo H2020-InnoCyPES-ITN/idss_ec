@@ -10,13 +10,20 @@
 set -e # Exit immediately if a command exits with a non-zero status.
 
 # Check if the number of peers is passed as an argument
-if [ $# -eq 0 ]; then
-  echo "Usage: $0 <number_of_peers>"
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <number_of_peers> [manager_peer_index] [--customers N] [--days N] [--interval-minutes N]"
   exit 1
 fi
 
 # Variables
 NUM_PEERS=$1
+shift
+MANAGER_PEER_INDEX=0
+if [[ $# -gt 0 && $1 != --* ]]; then
+  MANAGER_PEER_INDEX=$1
+  shift
+fi
+SERVER_ARGS=("$@")
 LOG_DIR="./logs"
 DB_DIR="./idss_graph_db"
 
@@ -49,7 +56,11 @@ launch_peer() {
   local INDEX=$1
   local TMP_LOG="${LOG_DIR}/peer_tmp_${INDEX}.log"
 
-  GOMAXPROCS=1 ./idss_server > "${TMP_LOG}" 2>&1 &
+  if [ "$INDEX" -eq "$MANAGER_PEER_INDEX" ]; then
+    GOMAXPROCS=1 ./idss_server -manager "${SERVER_ARGS[@]}" > "${TMP_LOG}" 2>&1 &
+  else
+    GOMAXPROCS=1 ./idss_server "${SERVER_ARGS[@]}" > "${TMP_LOG}" 2>&1 &
+  fi
 
   local PID=$!
   sleep 1

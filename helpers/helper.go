@@ -373,6 +373,7 @@ func SendErrorMessage(conn network.Stream, remotePeerID peer.ID, errorMsg string
 
 // Function to send the merged result to the client
 func SendMergedResult(conn network.Stream, remotePeer peer.ID, dataRows [][]interface{}, headers []string, kadDHT *dht.IpfsDHT) {
+    common.RowsReturned.Observe(float64(len(dataRows)))
     if remotePeer == kadDHT.Host().ID() { //TODO: Revisit the purpose of this and if we need to pass headers or not for local queries.
         resultMsg := &common.QueryMessage{
             Type:   common.MessageType_RESULT,

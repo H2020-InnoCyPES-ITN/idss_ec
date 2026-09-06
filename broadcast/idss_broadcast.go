@@ -559,6 +559,7 @@ func BroadcastQuery(msg *common.QueryMessage, parentStream network.Stream, confi
     peersInRoutingTable := kadDHT.RoutingTable().ListPeers()
 
     var mergedResults [][]interface{}
+	var peersResponded int
     targetProtocol := protocol.ID(config.ProtocolID)
     var eligiblePeers []peer.ID
 
@@ -656,7 +657,9 @@ func BroadcastQuery(msg *common.QueryMessage, parentStream network.Stream, confi
 
     for result := range remoteResultsChan {
         mergedResults = append(mergedResults, result...)
+		peersResponded++
     }
+	common.QueryPeersResponded.Observe(float64(peersResponded))
     logger.Infof("Remote results received, total rows before local: %d", len(mergedResults))
 
     localResults = filterHeaderRows(localResults, finalHeader)
@@ -877,6 +880,65 @@ func RunIDSSQueryWithDecision(command string, peer peer.ID, gm *graph.Manager, d
 	}
 
 	return [][]interface{}{{len(rows)}}, []string{"Count"}, nil
+}
+
+// LocalSettlementTotals returns aggregate-only settlement values for a period.
+func LocalSettlementTotals(gm *graph.Manager, hostID peer.ID, from time.Time, to time.Time) (float64, float64, error) {
+	period := fmt.Sprintf(` where timeStamp >= "%s" and timeStamp <= "%s"`, from.Format(time.RFC3339), to.Format(time.RFC3339))
+	meterRows, meterHeader, err := RunIDSSQuery("get MeterReading"+period, hostID, gm)
+	if err != nil { return 0, 0, fmt.Errorf("querying meter readings: %v", err) }
+	tradeRows, tradeHeader, err := RunIDSSQuery("get Trade"+period, hostID, gm)
+	if err != nil { return 0, 0, fmt.Errorf("querying trades: %v", err) }
+	return sumColumn(meterRows, meterHeader, "Value"), sumColumn(tradeRows, tradeHeader, "Volume"), nil
+}
+
+// CompileSettlement collects aggregate-only peer totals and stores local summaries.
+func CompileSettlement(gm *graph.Manager, kadDHT *dht.IpfsDHT, from time.Time, to time.Time) error {
+	host := kadDHT.Host()
+	results := []*common.SettlementResult{}
+	meterSum, tradeSum, err := LocalSettlementTotals(gm, host.ID(), from, to)
+	if err != nil { return err }
+	results = append(results, &common.SettlementResult{PeerId: host.ID().String(), MeterReadingSum: meterSum, TradeVolumeSum: tradeSum})
+	for _, remotePeer := range kadDHT.RoutingTable().ListPeers() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stream, err := host.NewStream(ctx, remotePeer, protocol.ID(common.IDSS_PROTOCOL_LOCAL))
+		if err == nil {
+			request := &common.QueryMessage{Type: common.MessageType_SETTLEMENT_REQUEST, SettlementRequest: &common.SettlementRequest{From: from.Format(time.RFC3339), To: to.Format(time.RFC3339)}}
+			payload, marshalErr := proto.Marshal(request)
+			if marshalErr == nil { err = helpers.WriteDelimitedMessage(stream, payload) }
+			if err == nil {
+				responseData, readErr := helpers.ReadDelimitedMessage(stream, ctx)
+				if readErr == nil {
+					response := &common.QueryMessage{}
+					if proto.Unmarshal(responseData, response) == nil && response.SettlementResult != nil { results = append(results, response.SettlementResult) }
+				}
+			}
+			stream.Close()
+		}
+		cancel()
+	}
+	for _, result := range results {
+		summary := data.NewGraphNode()
+		summary.SetAttr("key", fmt.Sprintf("settlement-%s-%d-%d", result.PeerId, from.Unix(), to.Unix()))
+		summary.SetAttr("kind", "SettlementSummary")
+		summary.SetAttr("member", result.PeerId)
+		summary.SetAttr("from", from.Format(time.RFC3339))
+		summary.SetAttr("to", to.Format(time.RFC3339))
+		summary.SetAttr("meterReadingSum", result.MeterReadingSum)
+		summary.SetAttr("tradeVolumeSum", result.TradeVolumeSum)
+		if err := gm.StoreNode("main", summary); err != nil { return fmt.Errorf("storing settlement summary: %v", err) }
+	}
+	logger.Infof("Compiled %d settlement summaries", len(results))
+	return nil
+}
+
+func sumColumn(rows [][]interface{}, header []string, name string) float64 {
+	index := -1
+	for position, label := range header { if strings.EqualFold(label, name) { index = position; break } }
+	if index < 0 { return 0 }
+	var total float64
+	for _, row := range rows { if index < len(row) { value, err := strconv.ParseFloat(fmt.Sprint(row[index]), 64); if err == nil { total += value } } }
+	return total
 }
 
 // Function to update the query state in the graph database

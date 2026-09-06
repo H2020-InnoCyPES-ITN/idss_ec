@@ -15,6 +15,9 @@ option go_package = "idss/graphdb/common"; // The package name for the generated
 enum MessageType {
     QUERY = 0;
     RESULT = 1;
+    CUSTOMER_REGISTRATION = 2;
+    SETTLEMENT_REQUEST = 3;
+    SETTLEMENT_RESULT = 4;
 }
 
 // QueryMessage represents a query being propagated in the network
@@ -33,6 +36,28 @@ message QueryMessage {
     int32 record_count = 12; // Number of records in the result
     string requester_id = 13; // Peer ID of the submitting client
     string requester_role = 14; // member, manager, or observer
+    CustomerRegistration customer_registration = 15;
+    SettlementRequest settlement_request = 16;
+    SettlementResult settlement_result = 17;
+}
+
+message CustomerRegistration {
+    string mrid = 1;
+    string name = 2;
+    string role = 3;
+    string membership_status = 4;
+    string contract_number = 5;
+}
+
+message SettlementRequest {
+    string from = 1;
+    string to = 2;
+}
+
+message SettlementResult {
+    string peer_id = 1;
+    double meter_reading_sum = 2;
+    double trade_volume_sum = 3;
 }
 
 message QueryState {
