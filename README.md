@@ -125,7 +125,7 @@ Within the `server` directory, run the bash script by specifying the number of p
 ```
 Each node will generate its folder directory for the database in `idss_graph_db`, and will generate its own log file in the `log` directory.
 
-Sample graph nodes and edges are generated using `generate_data.py`, and the data model is mapped by the generated `.json` file during peer launching.
+Sample energy-community graph nodes and edges are generated using `generate_data.py`, and the data model is mapped by the generated `.json` file during peer launching. Nodes use CIM-aligned kinds (`Customer`, `UsagePoint`, `EndDevice`, `GeneratingUnit`, `BatteryUnit`, `MeterReading`, `Offer`, `Bid`, and `Trade`); each node key is also stored as its `mRID`. The generator accepts `--num-customers`, `--days`, `--interval-minutes`, and `--seed` options. Its JSON contract is in `server/energy_community_schema.json`.
 
 Note: At least two peers should be started for an overlay to work since a connection among peers must be established.
 
@@ -142,8 +142,8 @@ go run . -s <server_address>
 ```
 A client should be able to connect. Proceed with query submission. Samples are given below. A number after the comma represents a TTL value (A time that you are willing to wait.
 ```sh
-get Client, 3
-get Consumption, 7
+get Customer, 3
+get MeterReading where readingType = "activePower", 7
 ```
 More advanced queries following EQL syntax are included in the `info.txt` file. A limited support of 
 Aggregate functions like `min`, `max`, `sum` and `avg` will also be finalised soon.

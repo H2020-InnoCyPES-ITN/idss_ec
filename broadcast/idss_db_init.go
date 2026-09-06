@@ -62,11 +62,14 @@ func generateData(dataFilePath string) error {
         return err
     }
 
-    // Pass configurable parameters (adjust as needed)
+    peerID := filepath.Base(filepath.Dir(dataFilePath))
+
+    // Generate deterministic data unique to this peer.
     cmd := exec.Command("python3", "generate_data.py", dataFilePath,
-        "--num-clients", "1",
-        "--num-consumptions", "1",
-        "--edges-per-client", "1")
+        "--num-customers", "4",
+        "--days", "1",
+        "--interval-minutes", "15",
+        "--seed", peerID)
     err := cmd.Run()
     if err != nil {
         logger.Fatal("Data generation command execution failed: ", err)
