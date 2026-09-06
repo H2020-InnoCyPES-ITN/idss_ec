@@ -13,6 +13,19 @@ fi
 
 MAX_PEERS=$1
 REPEATS=$2
+if ! [[ "${MAX_PEERS}" =~ ^[0-9]+$ ]] || ! [[ "${REPEATS}" =~ ^[0-9]+$ ]] || (( MAX_PEERS < 2 || REPEATS < 1 )); then
+    echo "max_peers must be at least 2 and repeats must be at least 1" >&2
+    exit 1
+fi
+
+for command in go python3 curl; do
+    if ! command -v "${command}" >/dev/null 2>&1; then
+        echo "Required command not found: ${command}" >&2
+        echo "Install Go 1.23+, Python 3, and curl, then rerun this script." >&2
+        exit 1
+    fi
+done
+
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SERVER_DIR="${ROOT_DIR}/server"
 CLIENT_DIR="${ROOT_DIR}/client"
@@ -43,10 +56,17 @@ for peer_count in $(seq 2 "${MAX_PEERS}"); do
         for attempt in $(seq 1 60); do
             peer_address=$(grep "First peer address:" "${RESULT_DIR}/peers-${peer_count}-${repeat}.log" | awk '{print $NF}' || true)
             [[ -n "${peer_address}" ]] && break
+            if ! kill -0 "${launcher_pid}" 2>/dev/null; then
+                echo "Peer launcher failed for ${peer_count} peers:" >&2
+                cat "${RESULT_DIR}/peers-${peer_count}-${repeat}.log" >&2
+                popd >/dev/null
+                exit 1
+            fi
             sleep 1
         done
         if [[ -z "${peer_address:-}" ]]; then
             echo "Unable to obtain a peer address for ${peer_count} peers" >&2
+            cat "${RESULT_DIR}/peers-${peer_count}-${repeat}.log" >&2
             kill "${launcher_pid}" 2>/dev/null || true
             wait "${launcher_pid}" 2>/dev/null || true
             popd >/dev/null
