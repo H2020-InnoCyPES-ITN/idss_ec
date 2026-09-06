@@ -28,6 +28,7 @@ import (
 
 	"flag"
 	"fmt"
+	"idss/graphdb/access"
 	"idss/graphdb/broadcast"
 	"idss/graphdb/common"
 	"idss/graphdb/flags"
@@ -196,6 +197,12 @@ func main() {
 		return
 	}
 
+	accessPolicy, err := access.LoadPolicy(config.PolicyPath)
+	if err != nil {
+		logger.Fatalf("Error loading access policy: %v", err)
+	}
+	logger.Infof("Loaded access policy from %s", config.PolicyPath)
+
 	// Print a complete peer listening address for client to connect
 	for _, addr := range host.Addrs() {
 		completePeerAddr := addr.Encapsulate(multiaddr.StringCast("/p2p/" + host.ID().String()))
@@ -253,7 +260,7 @@ func main() {
 	host.SetStreamHandler(protocol.ID(config.ProtocolID), func(stream network.Stream) { 
 		atomic.AddInt64(&activeConnections, 1)
 		defer atomic.AddInt64(&activeConnections, -1) // decrement when the handler exits
-		go handleRequest(stream, stream.Conn().RemotePeer().String(), ctx, config, graphManager, kadDHT, host)
+		go handleRequest(stream, stream.Conn().RemotePeer().String(), ctx, config, graphManager, kadDHT, host, accessPolicy)
 	})
 
 	// Handle SIGTERM and interrupt signals
@@ -315,7 +322,7 @@ func handlePeerDisconnection(iD peer.ID, kadDHT *dht.IpfsDHT) {
 }
 
 // A function to handle incoming requests from peers.
-func handleRequest(conn network.Stream, remotePeerID string, ctx context.Context, config flags.Config, gm *graph.Manager, kadDHT *dht.IpfsDHT, host host.Host) {
+func handleRequest(conn network.Stream, remotePeerID string, ctx context.Context, config flags.Config, gm *graph.Manager, kadDHT *dht.IpfsDHT, host host.Host, accessPolicy *access.Policy) {
 	//var currentMsg common.QueryMessage // give message a local scope
 	logger.Debug("Received incoming from %s", remotePeerID)
 	defer conn.Close()
@@ -340,13 +347,13 @@ func handleRequest(conn network.Stream, remotePeerID string, ctx context.Context
 		// This aims to handle only query messages. Other message types can be added and handled accordingly
 		// The client will send a query message to the server
 		if msg.Type == common.MessageType_QUERY{
-			handleQuery(conn, &msg, remotePeerID, config, gm, kadDHT, host)
+			handleQuery(conn, &msg, remotePeerID, config, gm, kadDHT, host, accessPolicy)
 		}
 	}
 }
 
 // Function to process the query message received from the client or intermediate peers
-func handleQuery(conn network.Stream, msg *common.QueryMessage, remotePeerID string, config flags.Config, gm *graph.Manager, kadDHT *dht.IpfsDHT, host host.Host) {
+func handleQuery(conn network.Stream, msg *common.QueryMessage, remotePeerID string, config flags.Config, gm *graph.Manager, kadDHT *dht.IpfsDHT, host host.Host, accessPolicy *access.Policy) {
 	if !isValidRequesterRole(msg.RequesterRole) {
 		err := fmt.Errorf("invalid requester role %q: expected member, manager, or observer", msg.RequesterRole)
 		logger.Errorf("Rejecting query %s from requester %s: %v", msg.Uqid, msg.RequesterId, err)
@@ -365,14 +372,18 @@ func handleQuery(conn network.Stream, msg *common.QueryMessage, remotePeerID str
 		logger.Debug("Query IGNORED")
 		return
 	}
+	decision := access.Allow
+	queryTrimmed := strings.TrimSpace(msg.Query)
+	queryLower := strings.ToLower(queryTrimmed)
+	if !isDataModification(queryLower) && msg.RequesterId != kadDHT.Host().ID().String() {
+		kinds := helpers.ExtractQueryKinds(msg.Query)
+		decision = accessPolicy.Evaluate(kinds, msg.RequesterRole)
+		logger.Infof("Access decision for requester %s (%s), kinds %v: %s", msg.RequesterId, msg.RequesterRole, kinds, decision)
+	}
 	logger.Infof("This is a new query on this peer")
 	logger.Infof("\nReceiver %s \nUQI: %s\nTTL: %f \nFrom: %s\nRequester: %s (%s)", kadDHT.Host().ID(), msg.Uqid, msg.Ttl, remotePeerID, msg.RequesterId, msg.RequesterRole) // for debugging
 	msg.State = &common.QueryState{State: common.QueryState_QUEUED} // Set the query state to QUEUED
 	broadcast.StoreQueryInfo(msg, gm, remotePeerID) // Store the query info in the graph database
-
-	// Normalize the query for parsing
-    queryLower := strings.ToLower(msg.Query)
-    queryTrimmed := strings.TrimSpace(msg.Query)
 
 	// Check if query is meant to be run locally or distributed
 	if strings.Contains(queryLower, "-l") ||
@@ -426,7 +437,7 @@ func handleQuery(conn network.Stream, msg *common.QueryMessage, remotePeerID str
 				
 				
 				// Execute the query locally
-				results, header, err := broadcast.RunIDSSQuery(msg.Query, host.ID(), gm)
+				results, header, err := broadcast.RunIDSSQueryWithDecision(msg.Query, host.ID(), gm, decision)
 				if err != nil {
 					logger.Errorf("Error executing local query: %v", err)
 					// Send an error message back to the client
@@ -443,6 +454,11 @@ func handleQuery(conn network.Stream, msg *common.QueryMessage, remotePeerID str
 			}
 	}
 
+	if decision == access.Deny {
+		broadcast.ExecuteAndBroadcastQuery(conn, msg, config, gm, kadDHT, decision)
+		return
+	}
+
 	if (
 		strings.Contains(msg.Query, "@avg(") ||
 		strings.Contains(msg.Query, "@min(") ||
@@ -452,7 +468,11 @@ func handleQuery(conn network.Stream, msg *common.QueryMessage, remotePeerID str
 		broadcast.HandleAggregateQuery(conn, msg, config, gm, kadDHT, helpers.ParseAggregates(msg.Query)[0])
 		return
 	}
-	broadcast.ExecuteAndBroadcastQuery(conn, msg, config, gm, kadDHT)
+	broadcast.ExecuteAndBroadcastQuery(conn, msg, config, gm, kadDHT, decision)
+}
+
+func isDataModification(query string) bool {
+	return strings.HasPrefix(query, "add") || strings.HasPrefix(query, "update") || strings.HasPrefix(query, "delete")
 }
 
 func isValidRequesterRole(role string) bool {

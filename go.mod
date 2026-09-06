@@ -10,6 +10,7 @@ require (
 	github.com/libp2p/go-libp2p-kad-dht v0.30.2
 	github.com/multiformats/go-multiaddr v0.15.0
 	github.com/sirupsen/logrus v1.9.3
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

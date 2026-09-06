@@ -332,6 +332,27 @@ func ExtractNodeKind(query string) (string) {
     return ""
 }
 
+// Function to extract target and traversal destination kinds from an EQL query.
+func ExtractQueryKinds(query string) []string {
+    kinds := make(map[string]struct{})
+    targetRe := regexp.MustCompile(`(?i)\b(?:get|lookup)\s+([A-Za-z_][A-Za-z0-9_]*)`)
+    for _, match := range targetRe.FindAllStringSubmatch(query, -1) {
+        kinds[match[1]] = struct{}{}
+    }
+
+    traversalRe := regexp.MustCompile(`(?i)\btraverse\s+[^\s:]*:[^\s:]*:[^\s:]*:([A-Za-z_][A-Za-z0-9_]*)`)
+    for _, match := range traversalRe.FindAllStringSubmatch(query, -1) {
+        kinds[match[1]] = struct{}{}
+    }
+
+    result := make([]string, 0, len(kinds))
+    for kind := range kinds {
+        result = append(result, kind)
+    }
+    sort.Strings(result)
+    return result
+}
+
 
 // Function to send an error message to the client
 func SendErrorMessage(conn network.Stream, remotePeerID peer.ID, errorMsg string) {

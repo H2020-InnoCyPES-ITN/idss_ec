@@ -129,6 +129,9 @@ Sample energy-community graph nodes and edges are generated using `generate_data
 
 Note: At least two peers should be started for an overlay to work since a connection among peers must be established.
 
+## Per-Peer Access Policy
+Each peer loads `server/policy.default.yaml` at startup. Use `-policy <path>` to select a different YAML policy for a peer. Policies evaluate requester roles (`member`, `manager`, or `observer`) against the node kinds referenced by a query. A rule can allow raw rows, permit aggregate/count-only results, or deny the peer's local contribution while the query continues through the overlay. A peer querying with its own peer ID is not restricted by its local policy.
+
 # Running queries
 All queries are submitted by the IDSS client. A client will connect to any peer that is 
 running in an overlay. To be able to connect, a client needs to know only the address of 

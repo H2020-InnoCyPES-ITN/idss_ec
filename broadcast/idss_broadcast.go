@@ -21,6 +21,7 @@ import (
 
 	"encoding/json"
 	"fmt"
+	"idss/graphdb/access"
 	"idss/graphdb/common"
 	"idss/graphdb/flags"
 	"idss/graphdb/helpers"
@@ -46,7 +47,7 @@ var logger = log.Logger("IDSS")
 //var header []string
 
 // Function to handle and broadcast queries in the IDSS system
-func ExecuteAndBroadcastQuery(conn network.Stream, msg *common.QueryMessage, config flags.Config, gm *graph.Manager, kadDHT *dht.IpfsDHT) {
+func ExecuteAndBroadcastQuery(conn network.Stream, msg *common.QueryMessage, config flags.Config, gm *graph.Manager, kadDHT *dht.IpfsDHT, decision access.Decision) {
 	// Get query details from the graph database
 	queryDetails, err := FetchQueryDetails(msg.Uqid, gm)
 	if err != nil {
@@ -103,7 +104,7 @@ func ExecuteAndBroadcastQuery(conn network.Stream, msg *common.QueryMessage, con
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		result, header, err := RunIDSSQuery(msg.Query, kadDHT.Host().ID(), gm)
+		result, header, err := RunIDSSQueryWithDecision(msg.Query, kadDHT.Host().ID(), gm, decision)
 		if err != nil {
 			logger.Errorf("Error executing local query: %v", err)
 			return
@@ -146,7 +147,7 @@ func ExecuteAndBroadcastQuery(conn network.Stream, msg *common.QueryMessage, con
 		
 
 		// Now broadcast
-		BroadcastQuery(msg, conn, config, gm, kadDHT, header)
+		BroadcastQuery(msg, conn, config, gm, kadDHT, header, decision)
 	}()
 
 	// Wait for all goroutines to complete
@@ -548,7 +549,7 @@ func ReceiveAggregateResponse(stream network.Stream, ctx context.Context) (float
 }
 
 // IDSS function to broadcast the query to connected peers. This function also filters out the originating and parent peers because they are already queried
-func BroadcastQuery(msg *common.QueryMessage, parentStream network.Stream, config flags.Config, gm *graph.Manager, kadDHT *dht.IpfsDHT, finalHeader []string) {
+func BroadcastQuery(msg *common.QueryMessage, parentStream network.Stream, config flags.Config, gm *graph.Manager, kadDHT *dht.IpfsDHT, finalHeader []string, decision access.Decision) {
     if !ShouldContinueBroadcastingQuery(msg, gm) {
         logger.Infof("Query %s will not be broadcast further due to state or TTL", msg.Uqid)
         return
@@ -576,7 +577,7 @@ func BroadcastQuery(msg *common.QueryMessage, parentStream network.Stream, confi
     remoteResultsChan := make(chan [][]interface{}, len(eligiblePeers))
     duration := time.Duration(int64(msg.Ttl)) * 1000 * time.Millisecond
 
-    localResults, finalHeader, err := RunIDSSQuery(msg.Query, kadDHT.Host().ID(), gm)
+	localResults, finalHeader, err := RunIDSSQueryWithDecision(msg.Query, kadDHT.Host().ID(), gm, decision)
     if err != nil {
         logger.Errorf("Error executing local query: %v", err)
         return
@@ -862,6 +863,20 @@ func RunIDSSQuery(command string, peer peer.ID, gm *graph.Manager) ([][]interfac
 	logger.Infof("Query result - Header: %v, Data Rows: %d", header, len(dataRows))
 	logger.Infof("Query result - Header: %v, Data Rows: %d, First Row: %v", header, len(dataRows), dataRows[0])
 	return dataRows, header, nil
+}
+
+// Function to execute a local query according to the receiving peer's access decision.
+func RunIDSSQueryWithDecision(command string, peer peer.ID, gm *graph.Manager, decision access.Decision) ([][]interface{}, []string, error) {
+	if decision == access.Deny {
+		return nil, nil, nil
+	}
+
+	rows, header, err := RunIDSSQuery(command, peer, gm)
+	if err != nil || decision != access.AggregateOnly {
+		return rows, header, err
+	}
+
+	return [][]interface{}{{len(rows)}}, []string{"Count"}, nil
 }
 
 // Function to update the query state in the graph database

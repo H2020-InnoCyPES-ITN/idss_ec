@@ -76,6 +76,7 @@ type Config struct {
 	ListenAddresses  addrList
 	ProtocolID       string
 	Filename         string
+	PolicyPath       string
 }
 
 // Function to parse the flags and return the configuration
@@ -91,6 +92,7 @@ func ParseFlags(peerID string) (Config, error) {
 	// Dynamically set the filename based on the peer ID
 	defaultFileName := "./idss_graph_db/" + peerID + "/" + peerID + "_data.json" // Will be used to store the graph data incase file name is not provided
 	flag.StringVar(&config.Filename, "f", defaultFileName, "JSON file containing the graph data for this peer.") // JSON file containing the graph data for this peer
+	flag.StringVar(&config.PolicyPath, "policy", "policy.default.yaml", "YAML file containing this peer's query access policy.")
 
 	flag.Parse()
 	return config, nil
