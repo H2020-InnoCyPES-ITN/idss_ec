@@ -336,8 +336,16 @@ func ExtractNodeKind(query string) (string) {
 // Function to send an error message to the client
 func SendErrorMessage(conn network.Stream, remotePeerID peer.ID, errorMsg string) {
     logger.Errorf("Sending error message to %s: %s", remotePeerID, errorMsg)
-    _, err := conn.Write([]byte(errorMsg))
+    resultMsg := &common.QueryMessage{
+        Type:  common.MessageType_RESULT,
+        Error: errorMsg,
+    }
+    msgBytes, err := proto.Marshal(resultMsg)
     if err != nil {
+        logger.Errorf("Error marshalling error message: %v", err)
+        return
+    }
+    if err := WriteDelimitedMessage(conn, msgBytes); err != nil {
         logger.Errorf("Error sending error message: %v", err)
     }
 }

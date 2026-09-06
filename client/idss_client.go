@@ -82,6 +82,7 @@ func main() {
 	// Define flag
 	serverAddrFlag := flag.String("s", "", "Server multiaddress")
 	IDSSProtocol := flag.String("p", "/lan/kad/1.0.0", "IDSS protocol") // By default use the local network protocol
+	requesterRole := flag.String("role", "member", "Requester role: member, manager, or observer")
 	flag.Parse()
 
 	if *serverAddrFlag == "" {
@@ -205,6 +206,8 @@ func main() {
 			Originator: serverPeer.String(),
 			Type:       common.MessageType_QUERY,
 			Sender:     host.ID().String(),
+			RequesterId: host.ID().String(),
+			RequesterRole: *requesterRole,
 		}
 
 		// Open stream
@@ -269,6 +272,10 @@ func main() {
 					continue // Skip adding header multiple times
 				}
 				allRows = append(allRows, data)
+			}
+
+			if part.Type == common.MessageType_RESULT {
+				break
 			}
 		}
 

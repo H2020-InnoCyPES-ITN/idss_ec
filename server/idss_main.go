@@ -347,6 +347,12 @@ func handleRequest(conn network.Stream, remotePeerID string, ctx context.Context
 
 // Function to process the query message received from the client or intermediate peers
 func handleQuery(conn network.Stream, msg *common.QueryMessage, remotePeerID string, config flags.Config, gm *graph.Manager, kadDHT *dht.IpfsDHT, host host.Host) {
+	if !isValidRequesterRole(msg.RequesterRole) {
+		err := fmt.Errorf("invalid requester role %q: expected member, manager, or observer", msg.RequesterRole)
+		logger.Errorf("Rejecting query %s from requester %s: %v", msg.Uqid, msg.RequesterId, err)
+		helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error())
+		return
+	}
 	
 	duplicateQuery, err := broadcast.CheckDuplicateQuery(msg.Uqid, gm) // with gm, we check queries in the graph database for this peer
 	if err != nil {
@@ -354,13 +360,13 @@ func handleQuery(conn network.Stream, msg *common.QueryMessage, remotePeerID str
 		return
 	}
 
-	logger.Debug("Query received:\nOn peer %s \nUQI: %s\nTTL: %f \nFrom: %s", kadDHT.Host().ID(), msg.Uqid, msg.Ttl, remotePeerID) // for debugging
+	logger.Debug("Query received:\nOn peer %s \nUQI: %s\nTTL: %f \nFrom: %s\nRequester: %s (%s)", kadDHT.Host().ID(), msg.Uqid, msg.Ttl, remotePeerID, msg.RequesterId, msg.RequesterRole) // for debugging
 	if len(duplicateQuery) > 0 {
 		logger.Debug("Query IGNORED")
 		return
 	}
 	logger.Infof("This is a new query on this peer")
-	logger.Infof("\nReceiver %s \nUQI: %s\nTTL: %f \nFrom: %s", kadDHT.Host().ID(), msg.Uqid, msg.Ttl, remotePeerID) // for debugging
+	logger.Infof("\nReceiver %s \nUQI: %s\nTTL: %f \nFrom: %s\nRequester: %s (%s)", kadDHT.Host().ID(), msg.Uqid, msg.Ttl, remotePeerID, msg.RequesterId, msg.RequesterRole) // for debugging
 	msg.State = &common.QueryState{State: common.QueryState_QUEUED} // Set the query state to QUEUED
 	broadcast.StoreQueryInfo(msg, gm, remotePeerID) // Store the query info in the graph database
 
@@ -447,6 +453,10 @@ func handleQuery(conn network.Stream, msg *common.QueryMessage, remotePeerID str
 		return
 	}
 	broadcast.ExecuteAndBroadcastQuery(conn, msg, config, gm, kadDHT)
+}
+
+func isValidRequesterRole(role string) bool {
+	return role == "member" || role == "manager" || role == "observer"
 }
 
 // Function to send a success message back to the client

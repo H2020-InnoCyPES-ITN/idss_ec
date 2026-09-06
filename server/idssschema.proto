@@ -31,6 +31,8 @@ message QueryMessage {
     repeated Row result = 9; // The result of the query
     string error = 10; // Error message if any
     int32 record_count = 12; // Number of records in the result
+    string requester_id = 13; // Peer ID of the submitting client
+    string requester_role = 14; // member, manager, or observer
 }
 
 message QueryState {

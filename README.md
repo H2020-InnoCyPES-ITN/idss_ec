@@ -138,9 +138,9 @@ From the IDSS root directory, change the directory to the client to proceed.
 
 ```sh
 cd client
-go run . -s <server_address>
+go run . -s <server_address> -role <member|manager|observer>
 ```
-A client should be able to connect. Proceed with query submission. Samples are given below. A number after the comma represents a TTL value (A time that you are willing to wait.
+A client should be able to connect. The requester role defaults to `member`; peers reject roles other than `member`, `manager`, and `observer`. Proceed with query submission. Samples are given below. A number after the comma represents a TTL value (A time that you are willing to wait.
 ```sh
 get Customer, 3
 get MeterReading where readingType = "activePower", 7
