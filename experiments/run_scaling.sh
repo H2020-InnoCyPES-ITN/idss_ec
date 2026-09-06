@@ -31,7 +31,6 @@ SERVER_DIR="${ROOT_DIR}/server"
 CLIENT_DIR="${ROOT_DIR}/client"
 RESULT_DIR="${ROOT_DIR}/experiments/results"
 CSV_FILE="${RESULT_DIR}/scaling.csv"
-TTLS=(3 7)
 QUERIES=(
     "customers|get Customer"
     "open_offers|get Offer where status = \"open\""
@@ -41,9 +40,8 @@ QUERIES=(
 mkdir -p "${RESULT_DIR}"
 echo "peer_count,query_label,ttl,elapsed_seconds,peers_responded,rows_returned" > "${CSV_FILE}"
 
-metric_count() {
-    curl --silent --fail http://127.0.0.1:2112/metrics 2>/dev/null |
-        awk '/^idss_query_peers_responded_count / {print $2; exit}' || echo 0
+monotonic_seconds() {
+    python3 -c 'import time; print(f"{time.monotonic():.9f}")'
 }
 
 for peer_count in $(seq 2 "${MAX_PEERS}"); do
@@ -55,7 +53,9 @@ for peer_count in $(seq 2 "${MAX_PEERS}"); do
 
         for attempt in $(seq 1 60); do
             peer_address=$(grep "First peer address:" "${RESULT_DIR}/peers-${peer_count}-${repeat}.log" | awk '{print $NF}' || true)
-            [[ -n "${peer_address}" ]] && break
+            if [[ -n "${peer_address}" ]] && grep -q "All peers have joined the overlay." "${RESULT_DIR}/peers-${peer_count}-${repeat}.log"; then
+                break
+            fi
             if ! kill -0 "${launcher_pid}" 2>/dev/null; then
                 echo "Peer launcher failed for ${peer_count} peers:" >&2
                 cat "${RESULT_DIR}/peers-${peer_count}-${repeat}.log" >&2
@@ -65,32 +65,69 @@ for peer_count in $(seq 2 "${MAX_PEERS}"); do
             sleep 1
         done
         if [[ -z "${peer_address:-}" ]]; then
-            echo "Unable to obtain a peer address for ${peer_count} peers" >&2
+            echo "Peers did not become ready for ${peer_count} peers" >&2
             cat "${RESULT_DIR}/peers-${peer_count}-${repeat}.log" >&2
             kill "${launcher_pid}" 2>/dev/null || true
             wait "${launcher_pid}" 2>/dev/null || true
             popd >/dev/null
-            continue
+            exit 1
         fi
+        mapfile -t peer_ids < <(grep 'Peer [0-9][0-9]* launched with ID ' "${RESULT_DIR}/peers-${peer_count}-${repeat}.log" | awk '{print $NF}')
+        ttl_limit=1
+        ttl_levels=0
+        while (( ttl_limit < peer_count )); do
+            ttl_limit=$((ttl_limit * 2))
+            ttl_levels=$((ttl_levels + 1))
+        done
+        ttl_limit=$((ttl_levels + 2))
         popd >/dev/null
 
-        for ttl in "${TTLS[@]}"; do
-            for query_spec in "${QUERIES[@]}"; do
-                label=${query_spec%%|*}
-                query=${query_spec#*|}
+        for query_spec in "${QUERIES[@]}"; do
+            label=${query_spec%%|*}
+            query=${query_spec#*|}
+            for ttl in $(seq 1 "${ttl_limit}"); do
                 rm -rf "${CLIENT_DIR}/results"
-                before=$(metric_count)
-                started=$(date +%s%N)
+                client_output=$(mktemp)
+                started=$(monotonic_seconds)
                 pushd "${CLIENT_DIR}" >/dev/null
-                printf '%s, %s\nexit\n' "${query}" "${ttl}" | go run . -role manager -s "${peer_address}" >/dev/null
+                if ! printf '%s, %s\nexit\n' "${query}" "${ttl}" | go run . -role manager -s "${peer_address}" >"${client_output}" 2>&1; then
+                    echo "Client query failed for ${label} with TTL ${ttl}" >&2
+                    cat "${client_output}" >&2
+                    popd >/dev/null
+                    rm -f "${client_output}"
+                    exit 1
+                fi
                 popd >/dev/null
-                finished=$(date +%s%N)
-                after=$(metric_count)
-                elapsed=$(awk -v start="${started}" -v end="${finished}" 'BEGIN { printf "%.6f", (end - start) / 1000000000 }')
-                peers_responded=$((after - before))
+                finished=$(monotonic_seconds)
+                elapsed=$(awk -v start="${started}" -v end="${finished}" 'BEGIN { value = end - start; if (value < 0) value = 0; printf "%.6f", value }')
+                uqi=$(sed -n 's/.*UQI:[[:space:]]*\([^[:space:]]*\).*/\1/p' "${client_output}" | head -n 1)
                 result_file=$(find "${CLIENT_DIR}/results" -type f -name '*.xml' | head -n 1)
-                rows_returned=$(grep -c '<result>' "${result_file}")
+                if [[ -z "${result_file}" ]]; then
+                    echo "Client produced no XML result for ${label} with TTL ${ttl}" >&2
+                    cat "${client_output}" >&2
+                    rm -f "${client_output}"
+                    exit 1
+                fi
+                rows_returned=$(sed -n 's:.*<resultCount>\([0-9][0-9]*\)</resultCount>.*:\1:p' "${result_file}" | head -n 1)
+                rows_returned=${rows_returned:-0}
+                if [[ -n "${uqi}" ]]; then
+                    peers_responded=0
+                    for peer_id in "${peer_ids[@]}"; do
+                        peer_log="${SERVER_DIR}/logs/${peer_id}.log"
+                        if grep -q -F "${uqi}" "${peer_log}" 2>/dev/null; then
+                            peers_responded=$((peers_responded + 1))
+                        fi
+                    done
+                else
+                    echo "Could not extract query UQI for ${label} with TTL ${ttl}" >&2
+                    peers_responded=0
+                fi
                 echo "${peer_count},${label},${ttl},${elapsed},${peers_responded},${rows_returned}" >> "${CSV_FILE}"
+                rm -f "${client_output}"
+
+                if (( peers_responded >= peer_count )); then
+                    break
+                fi
             done
         done
 
