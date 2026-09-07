@@ -373,12 +373,17 @@ func SendErrorMessage(conn network.Stream, remotePeerID peer.ID, errorMsg string
 
 // Function to send the merged result to the client
 func SendMergedResult(conn network.Stream, remotePeer peer.ID, dataRows [][]interface{}, headers []string, kadDHT *dht.IpfsDHT) {
+	SendMergedResultWithPeers(conn, remotePeer, dataRows, headers, nil, kadDHT)
+}
+
+func SendMergedResultWithPeers(conn network.Stream, remotePeer peer.ID, dataRows [][]interface{}, headers []string, respondingPeerIDs []string, kadDHT *dht.IpfsDHT) {
     common.RowsReturned.Observe(float64(len(dataRows)))
     if remotePeer == kadDHT.Host().ID() { //TODO: Revisit the purpose of this and if we need to pass headers or not for local queries.
         resultMsg := &common.QueryMessage{
             Type:   common.MessageType_RESULT,
             Result: CovertResultToProtobufRows(dataRows, headers), // No headers for inter-peer
             RecordCount: int32(len(dataRows)),
+            RespondingPeerIds: respondingPeerIDs,
         }
         msgBytes, err := proto.Marshal(resultMsg)
         if err != nil {
@@ -396,6 +401,7 @@ func SendMergedResult(conn network.Stream, remotePeer peer.ID, dataRows [][]inte
         Type:        common.MessageType_RESULT,
         Result:      CovertResultToProtobufRows(dataRows, headers),
         RecordCount: int32(len(dataRows)), // Explicit count; ensure QueryMessage has this field
+        RespondingPeerIds: respondingPeerIDs,
     }
     msgBytes, err := proto.Marshal(resultMsg)
     if err != nil {

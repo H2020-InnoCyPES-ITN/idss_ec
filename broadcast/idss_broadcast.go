@@ -15,6 +15,7 @@ import (
 	"context"
 	_ "net/http/pprof"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -128,7 +129,11 @@ func ExecuteAndBroadcastQuery(conn network.Stream, msg *common.QueryMessage, con
 		logger.Warn("TTL expired, not broadcasting query")
 		UpdateQueryState(msg, common.QueryState_SENT_BACK, gm)
 		wg.Wait() //
-		helpers.SendMergedResult(conn, conn.Conn().RemotePeer(), localResHolder, header, kadDHT)
+		respondingPeerIDs := map[string]struct{}{}
+		if decision != access.Deny {
+			respondingPeerIDs[kadDHT.Host().ID().String()] = struct{}{}
+		}
+		helpers.SendMergedResultWithPeers(conn, conn.Conn().RemotePeer(), localResHolder, header, peerIDList(respondingPeerIDs), kadDHT)
 		return
 	}
 
@@ -559,7 +564,10 @@ func BroadcastQuery(msg *common.QueryMessage, parentStream network.Stream, confi
     peersInRoutingTable := kadDHT.RoutingTable().ListPeers()
 
     var mergedResults [][]interface{}
-	var peersResponded int
+	respondingPeerIDs := make(map[string]struct{})
+	if decision != access.Deny {
+		respondingPeerIDs[kadDHT.Host().ID().String()] = struct{}{}
+	}
     targetProtocol := protocol.ID(config.ProtocolID)
     var eligiblePeers []peer.ID
 
@@ -571,11 +579,14 @@ func BroadcastQuery(msg *common.QueryMessage, parentStream network.Stream, confi
 
     if len(eligiblePeers) == 0 {
         logger.Warn("No eligible peers to broadcast to")
-        return
     }
 
     var wg sync.WaitGroup
-    remoteResultsChan := make(chan [][]interface{}, len(eligiblePeers))
+    type remoteResult struct {
+		rows    [][]interface{}
+		peerIDs []string
+	}
+	remoteResultsChan := make(chan remoteResult, len(eligiblePeers))
     duration := time.Duration(int64(msg.Ttl)) * 1000 * time.Millisecond
 
 	localResults, finalHeader, err := RunIDSSQueryWithDecision(msg.Query, kadDHT.Host().ID(), gm, decision)
@@ -645,7 +656,7 @@ func BroadcastQuery(msg *common.QueryMessage, parentStream network.Stream, confi
                 logger.Infof("Received %d raw records from peer %s", len(result), p)
                 filteredResult := filterHeaderRows(result, finalHeader)
                 logger.Debug("Filtered to %d records from peer %s", len(filteredResult), p)
-                remoteResultsChan <- filteredResult
+				remoteResultsChan <- remoteResult{rows: filteredResult, peerIDs: remoteResults.RespondingPeerIds}
             }
         }(peerID)
     }
@@ -656,10 +667,12 @@ func BroadcastQuery(msg *common.QueryMessage, parentStream network.Stream, confi
     }()
 
     for result := range remoteResultsChan {
-        mergedResults = append(mergedResults, result...)
-		peersResponded++
+		mergedResults = append(mergedResults, result.rows...)
+		for _, peerID := range result.peerIDs {
+			respondingPeerIDs[peerID] = struct{}{}
+		}
     }
-	common.QueryPeersResponded.Observe(float64(peersResponded))
+	common.QueryPeersResponded.Observe(float64(len(respondingPeerIDs)))
     logger.Infof("Remote results received, total rows before local: %d", len(mergedResults))
 
     localResults = filterHeaderRows(localResults, finalHeader)
@@ -686,7 +699,7 @@ func BroadcastQuery(msg *common.QueryMessage, parentStream network.Stream, confi
         msg.State = &common.QueryState{State: common.QueryState_SENT_BACK}
         UpdateQueryState(msg, common.QueryState_SENT_BACK, gm)
         logger.Infof("Intermediate peer %s sending %d rows to parent %s", kadDHT.Host().ID(), len(uniqueResults), parentPeerID)
-        helpers.SendMergedResult(parentStream, parentPeerID, uniqueResults, finalHeader, kadDHT)
+		helpers.SendMergedResultWithPeers(parentStream, parentPeerID, uniqueResults, finalHeader, peerIDList(respondingPeerIDs), kadDHT)
     } else {
         queryDetails, err := FetchQueryDetails(msg.Uqid, gm)
         if err != nil {
@@ -708,8 +721,17 @@ func BroadcastQuery(msg *common.QueryMessage, parentStream network.Stream, confi
             return
         }
         logger.Infof("Originator peer %s sending %d rows to client %s", kadDHT.Host().ID(), len(uniqueResults), clientPeerID)
-        helpers.SendMergedResult(parentStream, clientPeerID, uniqueResults, finalHeader, kadDHT)
+		helpers.SendMergedResultWithPeers(parentStream, clientPeerID, uniqueResults, finalHeader, peerIDList(respondingPeerIDs), kadDHT)
     }
+}
+
+func peerIDList(peerIDs map[string]struct{}) []string {
+	result := make([]string, 0, len(peerIDs))
+	for peerID := range peerIDs {
+		result = append(result, peerID)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func deduplicateRows(rows [][]interface{}) [][]interface{} {

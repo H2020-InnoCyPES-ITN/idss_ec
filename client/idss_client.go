@@ -240,6 +240,7 @@ func main() {
 		var allRows [][]string
 		var header []string
 		var errorMsg string
+		var respondingPeerCount int
 
 		for {
 			responseBytes, err := readDelimitedMessage(stream)
@@ -262,6 +263,9 @@ func main() {
 			if part.Error != "" {
 				errorMsg = part.Error // Capture error for FAILED state
 				break
+			}
+			if len(part.RespondingPeerIds) > respondingPeerCount {
+				respondingPeerCount = len(part.RespondingPeerIds)
 			}
 
 			// Accumulate rows, extract header from first chunk if present
@@ -290,6 +294,7 @@ func main() {
 			log.Infoln("\n----------- Response -----------")
 			dataNonHeaders := len(allRows) // Exclude header from count
 			log.Infof("Got %d records", dataNonHeaders)
+			log.Infof("Responding peers: %d", respondingPeerCount)
 			log.Infof("Time spent: %s", timeTaken)
 
 			// Check if it's a status message or query result

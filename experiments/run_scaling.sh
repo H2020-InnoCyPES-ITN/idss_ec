@@ -152,7 +152,8 @@ for peer_count in $(seq 2 "${MAX_PEERS}"); do
                 popd >/dev/null
                 finished=$(monotonic_seconds)
                 elapsed=$(awk -v start="${started}" -v end="${finished}" 'BEGIN { value = end - start; if (value < 0) value = 0; printf "%.6f", value }')
-                uqi=$(sed -n 's/.*UQI:[[:space:]]*\([^[:space:]]*\).*/\1/p' "${client_output}" | head -n 1)
+                responding_peer_count=$(sed -n 's/.*Responding peers:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "${client_output}" | tail -n 1)
+                responding_peer_count=${responding_peer_count:-0}
                 result_file=$(find "${CLIENT_DIR}/results" -type f -name '*.xml' | head -n 1)
                 if [[ -z "${result_file}" ]]; then
                     echo "Client produced no XML result for ${label} with TTL ${ttl}" >&2
@@ -164,18 +165,7 @@ for peer_count in $(seq 2 "${MAX_PEERS}"); do
                 rows_returned=${rows_returned:-0}
                 cp -a "${CLIENT_DIR}/results/." "${query_artifact_dir}/"
                 cp "${client_output}" "${RUN_DIR}/client-output/${peer_count}-${repeat}-${label}-ttl${ttl}.log"
-                if [[ -n "${uqi}" ]]; then
-                    peers_responded=0
-                    for peer_id in "${peer_ids[@]}"; do
-                        peer_log="${SERVER_DIR}/logs/${peer_id}.log"
-                        if grep -q -F "${uqi}" "${peer_log}" 2>/dev/null; then
-                            peers_responded=$((peers_responded + 1))
-                        fi
-                    done
-                else
-                    echo "Could not extract query UQI for ${label} with TTL ${ttl}" >&2
-                    peers_responded=0
-                fi
+                peers_responded=${responding_peer_count}
                 echo "${peer_count},${label},${ttl},${elapsed},${peers_responded},${rows_returned}" >> "${CSV_FILE}"
                 echo "${RUN_ID},${peer_count},${label},${ttl},${elapsed},${peers_responded},${rows_returned}" >> "${ALL_CSV_FILE}"
                 rm -f "${client_output}"

@@ -39,6 +39,7 @@ message QueryMessage {
     CustomerRegistration customer_registration = 15;
     SettlementRequest settlement_request = 16;
     SettlementResult settlement_result = 17;
+    repeated string responding_peer_ids = 18;
 }
 
 message CustomerRegistration {
