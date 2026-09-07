@@ -195,4 +195,38 @@ Run peer-count and TTL experiments:
 ./experiments/run_scaling.sh <max_peers> <repeats>
 ```
 
-The script runs fixed EC queries from two through `max_peers` peers at multiple TTLs and writes `experiments/results/scaling.csv`. Each row contains peer count, query label, TTL, elapsed time, responding peers, and returned rows.
+The script runs fixed EC queries from two through `max_peers` peers at adaptive TTL values starting at 1. Each invocation creates a unique UTC directory under `experiments/results/`, so later runs do not overwrite earlier evidence. Each run stores its `scaling.csv`, peer-launch logs, client logs, client XML results, and `metadata.txt`. The cumulative `experiments/results/all-results.csv` appends rows from every run and is the recommended input for publication plots. Each row contains run ID, peer count, query label, TTL, elapsed time, responding peers, and returned rows.
+
+### Large-Dataset Experiments
+
+The scaling script changes peer count but uses the generator defaults unless its launcher is extended with dataset options. To test a large dataset per peer, launch the network directly with explicit generator settings, then submit queries from a separate client terminal:
+
+```sh
+# Three peers; each peer generates 100 customers and 30 days of 15-minute readings
+cd server
+./start_peers.sh 3 --customers 100 --days 30 --interval-minutes 15
+```
+
+Use the first peer address from the launcher log:
+
+```sh
+cd client
+go run . -role manager -s <first_peer_address>
+```
+
+Useful large-result queries are:
+
+```text
+get Customer, 5
+get MeterReading where readingType = "activePower", 7
+get MeterReading where readingType = "activePower" show @sum(value), 7
+get Customer traverse owner:owns:asset:UsagePoint traverse point:records:reading:MeterReading, 7
+```
+
+At a 15-minute interval, one day contains 96 intervals. Reading volume is approximately:
+
+```text
+customers x days x 96 x reading types
+```
+
+For example, 100 customers, 30 days, and four reading types produce about 1,152,000 `MeterReading` nodes per peer, before counting customers, assets, offers, bids, and trades. Start with `--customers 10 --days 1`, then increase one dimension at a time. Stop the network from the server terminal with `./stop_clusters.sh` before starting another large run.

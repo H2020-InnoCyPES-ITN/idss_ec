@@ -26,19 +26,68 @@ for command in go python3 curl; do
     fi
 done
 
+QUERY_TIMEOUT_SECONDS=${QUERY_TIMEOUT_SECONDS:-120}
+if ! [[ "${QUERY_TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] || (( QUERY_TIMEOUT_SECONDS < 1 )); then
+    echo "QUERY_TIMEOUT_SECONDS must be a positive integer" >&2
+    exit 1
+fi
+if ! command -v timeout >/dev/null 2>&1; then
+    echo "Required command not found: timeout" >&2
+    exit 1
+fi
+
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SERVER_DIR="${ROOT_DIR}/server"
 CLIENT_DIR="${ROOT_DIR}/client"
 RESULT_DIR="${ROOT_DIR}/experiments/results"
-CSV_FILE="${RESULT_DIR}/scaling.csv"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-peers${MAX_PEERS}-repeats${REPEATS}"
+RUN_DIR="${RESULT_DIR}/${RUN_ID}"
+run_suffix=1
+while [[ -e "${RUN_DIR}" ]]; do
+    run_suffix=$((run_suffix + 1))
+    RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-peers${MAX_PEERS}-repeats${REPEATS}-${run_suffix}"
+    RUN_DIR="${RESULT_DIR}/${RUN_ID}"
+done
+CSV_FILE="${RUN_DIR}/scaling.csv"
+ALL_CSV_FILE="${RESULT_DIR}/all-results.csv"
 QUERIES=(
     "customers|get Customer"
     "open_offers|get Offer where status = \"open\""
     "active_power_sum|get MeterReading where readingType = \"activePower\" show @sum(value)"
 )
 
-mkdir -p "${RESULT_DIR}"
+mkdir -p "${RUN_DIR}/client-results" "${RUN_DIR}/peer-logs" "${RUN_DIR}/client-output"
+if [[ ! -f "${ALL_CSV_FILE}" ]]; then
+    echo "run_id,peer_count,query_label,ttl,elapsed_seconds,peers_responded,rows_returned" > "${ALL_CSV_FILE}"
+fi
 echo "peer_count,query_label,ttl,elapsed_seconds,peers_responded,rows_returned" > "${CSV_FILE}"
+cat > "${RUN_DIR}/metadata.txt" <<EOF
+run_id=${RUN_ID}
+started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+max_peers=${MAX_PEERS}
+repeats=${REPEATS}
+query_timeout_seconds=${QUERY_TIMEOUT_SECONDS}
+ttl_policy=starts at 1 and increases until all current-run peers respond or the peer-count bound is reached
+EOF
+
+launcher_pid=""
+current_peer_count=""
+current_repeat=""
+preserve_peer_logs() {
+    if [[ -n "${current_peer_count}" && -d "${SERVER_DIR}/logs" ]]; then
+        mkdir -p "${RUN_DIR}/peer-logs/${current_peer_count}-${current_repeat}"
+        cp -a "${SERVER_DIR}/logs/." "${RUN_DIR}/peer-logs/${current_peer_count}-${current_repeat}/" 2>/dev/null || true
+    fi
+}
+
+cleanup() {
+    preserve_peer_logs
+    if [[ -n "${launcher_pid}" ]]; then
+        kill "${launcher_pid}" 2>/dev/null || true
+        wait "${launcher_pid}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
 
 monotonic_seconds() {
     python3 -c 'import time; print(f"{time.monotonic():.9f}")'
@@ -46,19 +95,20 @@ monotonic_seconds() {
 
 for peer_count in $(seq 2 "${MAX_PEERS}"); do
     for repeat in $(seq 1 "${REPEATS}"); do
+        current_peer_count="${peer_count}"
+        current_repeat="${repeat}"
         pushd "${SERVER_DIR}" >/dev/null
-        ./start_peers.sh "${peer_count}" > "${RESULT_DIR}/peers-${peer_count}-${repeat}.log" 2>&1 &
+        ./start_peers.sh "${peer_count}" > "${RUN_DIR}/peers-${peer_count}-${repeat}.log" 2>&1 &
         launcher_pid=$!
-        trap 'kill "${launcher_pid}" 2>/dev/null || true' EXIT
 
         for attempt in $(seq 1 60); do
-            peer_address=$(grep "First peer address:" "${RESULT_DIR}/peers-${peer_count}-${repeat}.log" | awk '{print $NF}' || true)
-            if [[ -n "${peer_address}" ]] && grep -q "All peers have joined the overlay." "${RESULT_DIR}/peers-${peer_count}-${repeat}.log"; then
+            peer_address=$(grep "First peer address:" "${RUN_DIR}/peers-${peer_count}-${repeat}.log" | awk '{print $NF}' || true)
+            if [[ -n "${peer_address}" ]] && grep -q "All peers have joined the overlay." "${RUN_DIR}/peers-${peer_count}-${repeat}.log"; then
                 break
             fi
             if ! kill -0 "${launcher_pid}" 2>/dev/null; then
                 echo "Peer launcher failed for ${peer_count} peers:" >&2
-                cat "${RESULT_DIR}/peers-${peer_count}-${repeat}.log" >&2
+                cat "${RUN_DIR}/peers-${peer_count}-${repeat}.log" >&2
                 popd >/dev/null
                 exit 1
             fi
@@ -66,13 +116,13 @@ for peer_count in $(seq 2 "${MAX_PEERS}"); do
         done
         if [[ -z "${peer_address:-}" ]]; then
             echo "Peers did not become ready for ${peer_count} peers" >&2
-            cat "${RESULT_DIR}/peers-${peer_count}-${repeat}.log" >&2
+            cat "${RUN_DIR}/peers-${peer_count}-${repeat}.log" >&2
             kill "${launcher_pid}" 2>/dev/null || true
             wait "${launcher_pid}" 2>/dev/null || true
             popd >/dev/null
             exit 1
         fi
-        mapfile -t peer_ids < <(grep 'Peer [0-9][0-9]* launched with ID ' "${RESULT_DIR}/peers-${peer_count}-${repeat}.log" | awk '{print $NF}')
+        mapfile -t peer_ids < <(grep 'Peer [0-9][0-9]* launched with ID ' "${RUN_DIR}/peers-${peer_count}-${repeat}.log" | awk '{print $NF}')
         ttl_limit=1
         ttl_levels=0
         while (( ttl_limit < peer_count )); do
@@ -87,10 +137,12 @@ for peer_count in $(seq 2 "${MAX_PEERS}"); do
             query=${query_spec#*|}
             for ttl in $(seq 1 "${ttl_limit}"); do
                 rm -rf "${CLIENT_DIR}/results"
+                query_artifact_dir="${RUN_DIR}/client-results/${peer_count}-${repeat}-${label}-ttl${ttl}"
+                mkdir -p "${query_artifact_dir}"
                 client_output=$(mktemp)
                 started=$(monotonic_seconds)
                 pushd "${CLIENT_DIR}" >/dev/null
-                if ! printf '%s, %s\nexit\n' "${query}" "${ttl}" | go run . -role manager -s "${peer_address}" >"${client_output}" 2>&1; then
+                if ! printf '%s, %s\nexit\n' "${query}" "${ttl}" | timeout --kill-after=10 "${QUERY_TIMEOUT_SECONDS}s" go run . -role manager -s "${peer_address}" >"${client_output}" 2>&1; then
                     echo "Client query failed for ${label} with TTL ${ttl}" >&2
                     cat "${client_output}" >&2
                     popd >/dev/null
@@ -110,6 +162,8 @@ for peer_count in $(seq 2 "${MAX_PEERS}"); do
                 fi
                 rows_returned=$(sed -n 's:.*<resultCount>\([0-9][0-9]*\)</resultCount>.*:\1:p' "${result_file}" | head -n 1)
                 rows_returned=${rows_returned:-0}
+                cp -a "${CLIENT_DIR}/results/." "${query_artifact_dir}/"
+                cp "${client_output}" "${RUN_DIR}/client-output/${peer_count}-${repeat}-${label}-ttl${ttl}.log"
                 if [[ -n "${uqi}" ]]; then
                     peers_responded=0
                     for peer_id in "${peer_ids[@]}"; do
@@ -123,6 +177,7 @@ for peer_count in $(seq 2 "${MAX_PEERS}"); do
                     peers_responded=0
                 fi
                 echo "${peer_count},${label},${ttl},${elapsed},${peers_responded},${rows_returned}" >> "${CSV_FILE}"
+                echo "${RUN_ID},${peer_count},${label},${ttl},${elapsed},${peers_responded},${rows_returned}" >> "${ALL_CSV_FILE}"
                 rm -f "${client_output}"
 
                 if (( peers_responded >= peer_count )); then
@@ -131,10 +186,12 @@ for peer_count in $(seq 2 "${MAX_PEERS}"); do
             done
         done
 
+        preserve_peer_logs
         kill "${launcher_pid}" 2>/dev/null || true
         wait "${launcher_pid}" 2>/dev/null || true
-        trap - EXIT
+        launcher_pid=""
     done
 done
 
 echo "Wrote scaling results to ${CSV_FILE}"
+echo "Run artifacts preserved in ${RUN_DIR}"
