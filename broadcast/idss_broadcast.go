@@ -44,8 +44,12 @@ import (
 	//"github.com/multiformats/go-multihash/register/all"
 	"google.golang.org/protobuf/proto"
 )
+
 var logger = log.Logger("IDSS")
+
 //var header []string
+
+const maxConcurrentPeerQueries = 16
 
 // Function to handle and broadcast queries in the IDSS system
 func ExecuteAndBroadcastQuery(conn network.Stream, msg *common.QueryMessage, config flags.Config, gm *graph.Manager, kadDHT *dht.IpfsDHT, decision access.Decision) {
@@ -90,18 +94,17 @@ func ExecuteAndBroadcastQuery(conn network.Stream, msg *common.QueryMessage, con
 		logger.Warn("Arrival time not found or it is not a string")
 		return
 	}
-	
+
 	msg.Result = nil // Clear the result
 	msg.Uqid = queryDetails["Query Key"].(string)
 
-
 	logger.Infof("Query UQI: %s, TTL: %f", msg.Uqid, msg.Ttl) // for debugging
-	var wg sync.WaitGroup // Wait group to ensure all operations are completed before closing the stream
-	var localResHolder [][]interface{} // To hold the local results
-	startTime := time.Now() // for debugging duration of query execution
+	var wg sync.WaitGroup                                     // Wait group to ensure all operations are completed before closing the stream
+	var localResHolder [][]interface{}                        // To hold the local results
+	startTime := time.Now()                                   // for debugging duration of query execution
 	var header []string
 
-	// Run local query 
+	// Run local query
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -118,14 +121,14 @@ func ExecuteAndBroadcastQuery(conn network.Stream, msg *common.QueryMessage, con
 				header[i] = parts[len(parts)-1]
 			}
 		}
-		
+
 		localResHolder = result
 		UpdateQueryState(msg, common.QueryState_LOCALLY_EXECUTED, gm)
 		StoreResults(msg, localResHolder, gm)
 	}()
 
-	// Incase the TTL has expired, send available results to the parent peer 
-	if msg.Ttl <= 0 { // This will only be reached at intermediate peers
+	// Incase the TTL has expired, send available results to the parent peer
+	if msg.Ttl <= 0 { // This has to be reached at intermediate peers only
 		logger.Warn("TTL expired, not broadcasting query")
 		UpdateQueryState(msg, common.QueryState_SENT_BACK, gm)
 		wg.Wait() //
@@ -149,37 +152,14 @@ func ExecuteAndBroadcastQuery(conn network.Stream, msg *common.QueryMessage, con
 		}
 		msg.Sender = kadDHT.Host().ID().String() // So that the overlay peers identify this as parent peer
 
-		
-
 		// Now broadcast
 		BroadcastQuery(msg, conn, config, gm, kadDHT, header, decision)
 	}()
 
 	// Wait for all goroutines to complete
-	go func(){
+	go func() {
 		wg.Wait()
 		logger.Info("All operations in broadcast are complete parent peer")
-
-		//TODO: Fetch all stored results from the graph database and send to the parent peerHEREHER
-
-		// Fetch all stored results from the graph database and send to the parent peer
-		// This is to ensure that the parent peer gets all results even if they were not broadcast
-
-		//finalQuery := "get Results"
-
-		/* allResults, err := FetchAllResults(finalQuery, gm)
-		if err != nil {
-			logger.Errorf("Error fetching all results: %v", err)
-			return
-		} */
-
-		// Remove duplicates from the results and send to the parent peer
-		//allResults = RemoveDuplicates(allResults)
-
-		//logger.Info("All results: %s", allResults) // for debugging
-
-		// Send the results to the parent peer
-		//helpers.SendMergedResult(conn, conn.Conn().RemotePeer(), allResults, header, kadDHT)
 
 		logger.Infof("Time taken to execute query: %v", time.Since(startTime)) // for debugging
 		// close the stream
@@ -196,51 +176,51 @@ func HandleAggregateQuery(conn network.Stream, msg *common.QueryMessage, config 
 
 	logger.Infof("Handling aggregate query: %s with node %s", agg.Function, nodeKind) // Debugging logs
 
-    // Execute local aggregate
+	// Execute local aggregate
 	localSum, localCount, err := RunAggregatedQuery(agg, nodeKind, gm, kadDHT)
-    if err != nil {
-        logger.Errorf("Aggregate query failed: %v", err)
-        return
-    }
+	if err != nil {
+		logger.Errorf("Aggregate query failed: %v", err)
+		return
+	}
 
 	// Determine our full peer address.
-    myAddr := kadDHT.Host().Addrs()[0].Encapsulate(multiaddr.StringCast("/p2p/" + kadDHT.Host().ID().String())).String()
+	myAddr := kadDHT.Host().Addrs()[0].Encapsulate(multiaddr.StringCast("/p2p/" + kadDHT.Host().ID().String())).String()
 
 	// If this is an intermediate peer, merge and send the result to parent peer.
 	if msg.Originator != myAddr {
 		remoteResults := BroadcastAggregateQuery(msg, conn, config, gm, kadDHT)
 		totalSum, totalCount := localSum, localCount
-        for _, r := range remoteResults {
-            totalSum += r[0]
-            totalCount += r[1]
-        }
-        switch agg.Function {
-        case "avg":
-            helpers.SendPartialAggregateResult(conn, agg, totalSum, totalCount, kadDHT)
-        case "sum":
-            helpers.SendPartialAggregateResult(conn, agg, totalSum, 0, kadDHT)
-        case "max":
-            finalMax := localSum
-            for _, r := range remoteResults {
-                if r[0] > finalMax {
-                    finalMax = r[0]
-                }
-            }
-            helpers.SendPartialAggregateResult(conn, agg, finalMax, 0, kadDHT)
-        case "min":
-            finalMin := localSum
-            for _, r := range remoteResults {
-                if r[0] < finalMin {
-                    finalMin = r[0]
-                }
-            }
-            helpers.SendPartialAggregateResult(conn, agg, finalMin, 0, kadDHT)
-        }
-        return
+		for _, r := range remoteResults {
+			totalSum += r[0]
+			totalCount += r[1]
+		}
+		switch agg.Function {
+		case "avg":
+			helpers.SendPartialAggregateResult(conn, agg, totalSum, totalCount, kadDHT)
+		case "sum":
+			helpers.SendPartialAggregateResult(conn, agg, totalSum, 0, kadDHT)
+		case "max":
+			finalMax := localSum
+			for _, r := range remoteResults {
+				if r[0] > finalMax {
+					finalMax = r[0]
+				}
+			}
+			helpers.SendPartialAggregateResult(conn, agg, finalMax, 0, kadDHT)
+		case "min":
+			finalMin := localSum
+			for _, r := range remoteResults {
+				if r[0] < finalMin {
+					finalMin = r[0]
+				}
+			}
+			helpers.SendPartialAggregateResult(conn, agg, finalMin, 0, kadDHT)
+		}
+		return
 	}
 
-    // Otherwise, this is the originator. Merge remote results and compute the final aggregate.
-    remoteResults := BroadcastAggregateQuery(msg, conn, config, gm, kadDHT)
+	// Otherwise, this is the originator. Merge remote results and compute the final aggregate.
+	remoteResults := BroadcastAggregateQuery(msg, conn, config, gm, kadDHT)
 	totalSum := localSum
 	totalCount := localCount
 
@@ -251,32 +231,32 @@ func HandleAggregateQuery(conn network.Stream, msg *common.QueryMessage, config 
 
 	var finalValue float64
 	switch agg.Function {
-		case "avg":
-			if totalCount != 0 {
-				finalValue = totalSum / totalCount
-			}else{
-				finalValue = 0
-			}
-		case "sum":
-			finalValue = totalSum
-		case "max":
-			localMax, _, _ := RunAggregatedQuery(common.AggregateInfo{Function: "max", Traversal: agg.Traversal, Filter: agg.Filter, Attribute: agg.Attribute}, nodeKind, gm, kadDHT)
-			finalValue = localMax
-			for _, r := range remoteResults {
-				if r[0] > finalValue {
-					finalValue = r[0]
-				}
-			}
-		case "min":
-			localMin, _, _ := RunAggregatedQuery(common.AggregateInfo{Function: "min", Traversal: agg.Traversal, Filter: agg.Filter, Attribute: agg.Attribute}, nodeKind, gm, kadDHT)
-			finalValue = localMin
-			for _, r := range remoteResults {
-				if r[0] < finalValue {
-					finalValue = r[0]
-				}
-			}
-		default:
+	case "avg":
+		if totalCount != 0 {
+			finalValue = totalSum / totalCount
+		} else {
 			finalValue = 0
+		}
+	case "sum":
+		finalValue = totalSum
+	case "max":
+		localMax, _, _ := RunAggregatedQuery(common.AggregateInfo{Function: "max", Traversal: agg.Traversal, Filter: agg.Filter, Attribute: agg.Attribute}, nodeKind, gm, kadDHT)
+		finalValue = localMax
+		for _, r := range remoteResults {
+			if r[0] > finalValue {
+				finalValue = r[0]
+			}
+		}
+	case "min":
+		localMin, _, _ := RunAggregatedQuery(common.AggregateInfo{Function: "min", Traversal: agg.Traversal, Filter: agg.Filter, Attribute: agg.Attribute}, nodeKind, gm, kadDHT)
+		finalValue = localMin
+		for _, r := range remoteResults {
+			if r[0] < finalValue {
+				finalValue = r[0]
+			}
+		}
+	default:
+		finalValue = 0
 	}
 
 	logger.Infof("Computed %s aggregate: %f", agg.Function, finalValue) // Debugging logs
@@ -296,9 +276,9 @@ func HandleAggregateQuery(conn network.Stream, msg *common.QueryMessage, config 
 }
 
 // Function to send the partial aggregate result to the parent peer
-func RunAggregatedQuery(agg common.AggregateInfo, nodeKind string ,gm *graph.Manager, kadDHT *dht.IpfsDHT) ( float64,  float64,  error) {
+func RunAggregatedQuery(agg common.AggregateInfo, nodeKind string, gm *graph.Manager, kadDHT *dht.IpfsDHT) (float64, float64, error) {
 	// Construct the base query.
-    var baseQuery string
+	var baseQuery string
 	if !strings.Contains(agg.Traversal, ":") {
 		// When there is no colon, assume the attribute is directly on the node.
 		baseQuery = fmt.Sprintf("get %s", nodeKind)
@@ -429,16 +409,17 @@ func StoreQueryInfo(msg *common.QueryMessage, graphManager *graph.Manager, remot
 
 // Function to broadcast the aggregate query to connected peers
 func BroadcastAggregateQuery(msg *common.QueryMessage, parentStream network.Stream, config flags.Config, gm *graph.Manager, kadDHT *dht.IpfsDHT) [][2]float64 {
-    var remoteResults [][2]float64
-    var mu sync.Mutex
-    var wg sync.WaitGroup
+	var remoteResults [][2]float64
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	streamSlots := make(chan struct{}, maxConcurrentPeerQueries)
 
-    targetProtocol := protocol.ID(config.ProtocolID) // Protocol ID for the stream
+	targetProtocol := protocol.ID(config.ProtocolID)  // Protocol ID for the stream
 	connectedPeers := kadDHT.Host().Network().Peers() // Connected peers are the peers
 	var eligiblePeers []peer.ID
 
 	for _, peerID := range connectedPeers {
-		if 	peerID != kadDHT.Host().ID() && 
+		if peerID != kadDHT.Host().ID() &&
 			(parentStream == nil || parentStream.Conn().RemotePeer() != peerID) {
 			// Check if the peer is in the closest peers list then add to eligible peers
 			eligiblePeers = append(eligiblePeers, peerID) // Check if there is an active connection to the peer
@@ -456,18 +437,20 @@ func BroadcastAggregateQuery(msg *common.QueryMessage, parentStream network.Stre
 		logger.Errorf("Error updating TTL: %v", err)
 	}
 	logger.Infof("Broadcasting query with TTL: %f", msg.Ttl)
-    
-    for _, peerID := range eligiblePeers {
-        wg.Add(1)
-        go func(p peer.ID) {
-            defer wg.Done()
+
+	for _, peerID := range eligiblePeers {
+		wg.Add(1)
+		go func(p peer.ID) {
+			defer wg.Done()
+			streamSlots <- struct{}{}
+			defer func() { <-streamSlots }()
 
 			msgCopy := proto.Clone(msg).(*common.QueryMessage) // Clone the message to
 			msgCopy.Result = nil
-            
-            // Stream creation
+
+			// Stream creation
 			streamCtx, streamCancel := context.WithTimeout(
-				context.Background(), 
+				context.Background(),
 				time.Duration(msgCopy.Ttl)*1000*time.Millisecond) // Stream life span is the TTL
 			defer streamCancel()
 
@@ -492,237 +475,240 @@ func BroadcastAggregateQuery(msg *common.QueryMessage, parentStream network.Stre
 			}
 
 			logger.Info("Query sent to peer %s, with TTL: %v. Awaiting for response", p, msgCopy.Ttl)
-            
-            // Receive response
-            sum, count, err := ReceiveAggregateResponse(stream, streamCtx)
-            if err != nil {
-                return
-            }
 
-            mu.Lock()
-            remoteResults = append(remoteResults, [2]float64{sum, count})
-            mu.Unlock()
-        }(peerID)
-    }
-    
-    wg.Wait()
-    return remoteResults
+			// Receive response
+			sum, count, err := ReceiveAggregateResponse(stream, streamCtx)
+			if err != nil {
+				return
+			}
+
+			mu.Lock()
+			remoteResults = append(remoteResults, [2]float64{sum, count})
+			mu.Unlock()
+		}(peerID)
+	}
+
+	wg.Wait()
+	return remoteResults
 }
 
 // Function to send the partial aggregate result to the parent peer
 func ReceiveAggregateResponse(stream network.Stream, ctx context.Context) (float64, float64, error) {
-    defer stream.Close()
+	defer stream.Close()
 
-    // Read response message
-    msgBytes, err := helpers.ReadDelimitedMessage(stream, ctx)
-    if err != nil {
-        return 0, 0, fmt.Errorf("error reading response: %v", err)
-    }
+	// Read response message
+	msgBytes, err := helpers.ReadDelimitedMessage(stream, ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("error reading response: %v", err)
+	}
 
-    // Unmarshal response into QueryMessage
-    var response common.QueryMessage
-    err = proto.Unmarshal(msgBytes, &response)
-    if err != nil {
-        return 0, 0, fmt.Errorf("error unmarshalling response: %v", err)
-    }
+	// Unmarshal response into QueryMessage
+	var response common.QueryMessage
+	err = proto.Unmarshal(msgBytes, &response)
+	if err != nil {
+		return 0, 0, fmt.Errorf("error unmarshalling response: %v", err)
+	}
 
-    // Ensure the received message is of type RESULT
-    if response.Type != common.MessageType_RESULT {
-        return 0, 0, fmt.Errorf("unexpected message type: %v", response.Type)
-    }
+	// Ensure the received message is of type RESULT
+	if response.Type != common.MessageType_RESULT {
+		return 0, 0, fmt.Errorf("unexpected message type: %v", response.Type)
+	}
 
-    // Extract sum and count values from the response
-    if len(response.Result) < 1 || len(response.Result[0].Data) < 1 {
-        return 0, 0, fmt.Errorf("received empty aggregate result")
-    }
+	// Extract sum and count values from the response
+	if len(response.Result) < 1 || len(response.Result[0].Data) < 1 {
+		return 0, 0, fmt.Errorf("received empty aggregate result")
+	}
 
-    var sum, count float64
-    sum, err = strconv.ParseFloat(response.Result[0].Data[0], 64)
-    if err != nil {
-        return 0, 0, fmt.Errorf("error parsing sum: %v", err)
-    }
+	var sum, count float64
+	sum, err = strconv.ParseFloat(response.Result[0].Data[0], 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("error parsing sum: %v", err)
+	}
 
-    // Check if the response includes a count value (needed for AVG queries)
-    if len(response.Result[0].Data) > 1 {
-        count, err = strconv.ParseFloat(response.Result[0].Data[1], 64)
-        if err != nil {
-            return 0, 0, fmt.Errorf("error parsing count: %v", err)
-        }
-    }
+	// Check if the response includes a count value (needed for AVG queries)
+	if len(response.Result[0].Data) > 1 {
+		count, err = strconv.ParseFloat(response.Result[0].Data[1], 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("error parsing count: %v", err)
+		}
+	}
 
-    return sum, count, nil
+	return sum, count, nil
 }
 
 // IDSS function to broadcast the query to connected peers. This function also filters out the originating and parent peers because they are already queried
 func BroadcastQuery(msg *common.QueryMessage, parentStream network.Stream, config flags.Config, gm *graph.Manager, kadDHT *dht.IpfsDHT, finalHeader []string, decision access.Decision) {
-    if !ShouldContinueBroadcastingQuery(msg, gm) {
-        logger.Infof("Query %s will not be broadcast further due to state or TTL", msg.Uqid)
-        return
-    }
+	if !ShouldContinueBroadcastingQuery(msg, gm) {
+		logger.Infof("Query %s will not be broadcast further due to state or TTL", msg.Uqid)
+		return
+	}
 
-    logger.Infof("We can continue broadcasting query: %s, TTL: %v", msg.Uqid, msg.Ttl)
-    peersInRoutingTable := kadDHT.RoutingTable().ListPeers()
+	logger.Infof("We can continue broadcasting query: %s, TTL: %v", msg.Uqid, msg.Ttl)
+	peersInRoutingTable := kadDHT.RoutingTable().ListPeers()
 
-    var mergedResults [][]interface{}
+	var mergedResults [][]interface{}
 	respondingPeerIDs := make(map[string]struct{})
 	if decision != access.Deny {
 		respondingPeerIDs[kadDHT.Host().ID().String()] = struct{}{}
 	}
-    targetProtocol := protocol.ID(config.ProtocolID)
-    var eligiblePeers []peer.ID
+	targetProtocol := protocol.ID(config.ProtocolID)
+	var eligiblePeers []peer.ID
 
-    for _, peerID := range peersInRoutingTable {
-        if peerID != kadDHT.Host().ID() && (parentStream == nil || parentStream.Conn().RemotePeer() != peerID) {
-            eligiblePeers = append(eligiblePeers, peerID)
-        }
-    }
+	for _, peerID := range peersInRoutingTable {
+		if peerID != kadDHT.Host().ID() && (parentStream == nil || parentStream.Conn().RemotePeer() != peerID) {
+			eligiblePeers = append(eligiblePeers, peerID)
+		}
+	}
 
-    if len(eligiblePeers) == 0 {
-        logger.Warn("No eligible peers to broadcast to")
-    }
+	if len(eligiblePeers) == 0 {
+		logger.Warn("No eligible peers to broadcast to")
+	}
 
-    var wg sync.WaitGroup
-    type remoteResult struct {
+	var wg sync.WaitGroup
+	type remoteResult struct {
 		rows    [][]interface{}
 		peerIDs []string
 	}
 	remoteResultsChan := make(chan remoteResult, len(eligiblePeers))
-    duration := time.Duration(int64(msg.Ttl)) * 1000 * time.Millisecond
+	streamSlots := make(chan struct{}, maxConcurrentPeerQueries)
+	duration := time.Duration(int64(msg.Ttl)) * 1000 * time.Millisecond
 
 	localResults, finalHeader, err := RunIDSSQueryWithDecision(msg.Query, kadDHT.Host().ID(), gm, decision)
-    if err != nil {
-        logger.Errorf("Error executing local query: %v", err)
-        return
-    }
+	if err != nil {
+		logger.Errorf("Error executing local query: %v", err)
+		return
+	}
 
 	// Use finalHeader if provided, otherwise use local header
-    if len(finalHeader) == 0 {
-        for i, h := range finalHeader {
-            parts := strings.FieldsFunc(h, func(r rune) bool { return r == ':' || r == ' ' })
-            if len(parts) > 0 {
-                finalHeader[i] = parts[len(parts)-1]
-            }
-        }
-    }
+	if len(finalHeader) == 0 {
+		for i, h := range finalHeader {
+			parts := strings.FieldsFunc(h, func(r rune) bool { return r == ':' || r == ' ' })
+			if len(parts) > 0 {
+				finalHeader[i] = parts[len(parts)-1]
+			}
+		}
+	}
 
-    logger.Infof("Query result - Header: %v, Data Rows: %d", finalHeader, len(localResults))
+	logger.Infof("Query result - Header: %v, Data Rows: %d", finalHeader, len(localResults))
 
-    for _, peerID := range eligiblePeers {
-        wg.Add(1)
-        go func(p peer.ID) {
-            defer wg.Done()
+	for _, peerID := range eligiblePeers {
+		wg.Add(1)
+		go func(p peer.ID) {
+			defer wg.Done()
+			streamSlots <- struct{}{}
+			defer func() { <-streamSlots }()
 
-            streamCtx, cancel := context.WithTimeout(context.Background(), duration)
-            defer cancel()
+			streamCtx, cancel := context.WithTimeout(context.Background(), duration)
+			defer cancel()
 
-            stream, err := kadDHT.Host().NewStream(streamCtx, p, targetProtocol)
-            if err != nil {
-                logger.Debugf("Error writing query to peer %s: %v", p, err)
-                return
-            }
-            defer stream.Close()
+			stream, err := kadDHT.Host().NewStream(streamCtx, p, targetProtocol)
+			if err != nil {
+				logger.Debugf("Error writing query to peer %s: %v", p, err)
+				return
+			}
+			defer stream.Close()
 
-            if err := UpdateTTL(msg, gm); err != nil {
-                logger.Errorf("Error updating TTL: %v", err)
-            }
+			if err := UpdateTTL(msg, gm); err != nil {
+				logger.Errorf("Error updating TTL: %v", err)
+			}
 
-            msg.Type = common.MessageType_QUERY
-            msgBytes, err := proto.Marshal(msg)
-            if err != nil {
-                logger.Errorf("Error marshalling query message: %v", err)
-                return
-            }
+			msg.Type = common.MessageType_QUERY
+			msgBytes, err := proto.Marshal(msg)
+			if err != nil {
+				logger.Errorf("Error marshalling query message: %v", err)
+				return
+			}
 
-            if err := helpers.WriteDelimitedMessage(stream, msgBytes); err != nil {
-                logger.Debugf("Error writing query to peer %s: %v", p, err)
-                return
-            }
+			if err := helpers.WriteDelimitedMessage(stream, msgBytes); err != nil {
+				logger.Debugf("Error writing query to peer %s: %v", p, err)
+				return
+			}
 
-            logger.Infof("Query sent to peer %s, with TTL: %v", p, msg.Ttl)
+			logger.Infof("Query sent to peer %s, with TTL: %v", p, msg.Ttl)
 
-            data, err := helpers.ReadDelimitedMessage(stream, streamCtx)
-            if err != nil {
-                logger.Debugf("Error reading remote results from peer %s: %v", p, err)
-                return
-            }
+			data, err := helpers.ReadDelimitedMessage(stream, streamCtx)
+			if err != nil {
+				logger.Debugf("Error reading remote results from peer %s: %v", p, err)
+				return
+			}
 
-            var remoteResults common.QueryMessage
-            if err := proto.Unmarshal(data, &remoteResults); err != nil {
-                logger.Errorf("Error unmarshalling remote results from peer %s: %v", p, err)
-                return
-            }
-            if remoteResults.Type == common.MessageType_RESULT {
-                result := helpers.ConvertProtobufRowsToResult(remoteResults.Result)
-                logger.Infof("Received %d raw records from peer %s", len(result), p)
-                filteredResult := filterHeaderRows(result, finalHeader)
-                logger.Debug("Filtered to %d records from peer %s", len(filteredResult), p)
+			var remoteResults common.QueryMessage
+			if err := proto.Unmarshal(data, &remoteResults); err != nil {
+				logger.Errorf("Error unmarshalling remote results from peer %s: %v", p, err)
+				return
+			}
+			if remoteResults.Type == common.MessageType_RESULT {
+				result := helpers.ConvertProtobufRowsToResult(remoteResults.Result)
+				logger.Infof("Received %d raw records from peer %s", len(result), p)
+				filteredResult := filterHeaderRows(result, finalHeader)
+				logger.Debug("Filtered to %d records from peer %s", len(filteredResult), p)
 				remoteResultsChan <- remoteResult{rows: filteredResult, peerIDs: remoteResults.RespondingPeerIds}
-            }
-        }(peerID)
-    }
+			}
+		}(peerID)
+	}
 
-    go func() {
-        wg.Wait()
-        close(remoteResultsChan)
-    }()
+	go func() {
+		wg.Wait()
+		close(remoteResultsChan)
+	}()
 
-    for result := range remoteResultsChan {
+	for result := range remoteResultsChan {
 		mergedResults = append(mergedResults, result.rows...)
 		for _, peerID := range result.peerIDs {
 			respondingPeerIDs[peerID] = struct{}{}
 		}
-    }
+	}
 	common.QueryPeersResponded.Observe(float64(len(respondingPeerIDs)))
-    logger.Infof("Remote results received, total rows before local: %d", len(mergedResults))
+	logger.Infof("Remote results received, total rows before local: %d", len(mergedResults))
 
-    localResults = filterHeaderRows(localResults, finalHeader)
-    logger.Infof("Local results after filtering: %d", len(localResults))
-    mergedResults = append(mergedResults, localResults...)
-    logger.Infof("Total rows before deduplication: %d", len(mergedResults))
-    uniqueResults := deduplicateRows(mergedResults)
-    logger.Infof("Merged local and remote results, unique rows: %d", len(uniqueResults))
+	localResults = filterHeaderRows(localResults, finalHeader)
+	logger.Infof("Local results after filtering: %d", len(localResults))
+	mergedResults = append(mergedResults, localResults...)
+	logger.Infof("Total rows before deduplication: %d", len(mergedResults))
+	uniqueResults := deduplicateRows(mergedResults)
+	logger.Infof("Merged local and remote results, unique rows: %d", len(uniqueResults))
 
 	// Reapply WITH clause sorting if present in the original query
-    withClauses := helpers.ParseWithClauses(msg.Query)
-    if withClauses != nil {
+	withClauses := helpers.ParseWithClauses(msg.Query)
+	if withClauses != nil {
 		logger.Infof("Applying WITH clause: %v on header: %v", withClauses, finalHeader)
-        uniqueResults = helpers.ApplyWithClauses(uniqueResults, finalHeader, withClauses)
-        logger.Infof("Applied WITH clause sorting from query '%s', final rows: %d", msg.Query, len(uniqueResults))
+		uniqueResults = helpers.ApplyWithClauses(uniqueResults, finalHeader, withClauses)
+		logger.Infof("Applied WITH clause sorting from query '%s', final rows: %d", msg.Query, len(uniqueResults))
 		logger.Info("Header after applying WITH clause: ", finalHeader)
-    }
+	}
 
-    parentPeerID := parentStream.Conn().RemotePeer()
-    peerAddr := kadDHT.Host().Addrs()[0].Encapsulate(multiaddr.StringCast("/p2p/" + kadDHT.Host().ID().String())).String()
+	parentPeerID := parentStream.Conn().RemotePeer()
+	peerAddr := kadDHT.Host().Addrs()[0].Encapsulate(multiaddr.StringCast("/p2p/" + kadDHT.Host().ID().String())).String()
 
-    logger.Infof("Comparing originator %s with current peer %s", msg.Originator, peerAddr)
-    if msg.Originator != peerAddr {
-        msg.State = &common.QueryState{State: common.QueryState_SENT_BACK}
-        UpdateQueryState(msg, common.QueryState_SENT_BACK, gm)
-        logger.Infof("Intermediate peer %s sending %d rows to parent %s", kadDHT.Host().ID(), len(uniqueResults), parentPeerID)
+	logger.Infof("Comparing originator %s with current peer %s", msg.Originator, peerAddr)
+	if msg.Originator != peerAddr {
+		msg.State = &common.QueryState{State: common.QueryState_SENT_BACK}
+		UpdateQueryState(msg, common.QueryState_SENT_BACK, gm)
+		logger.Infof("Intermediate peer %s sending %d rows to parent %s", kadDHT.Host().ID(), len(uniqueResults), parentPeerID)
 		helpers.SendMergedResultWithPeers(parentStream, parentPeerID, uniqueResults, finalHeader, peerIDList(respondingPeerIDs), kadDHT)
-    } else {
-        queryDetails, err := FetchQueryDetails(msg.Uqid, gm)
-        if err != nil {
-            logger.Errorf("Error fetching query details: %v", err)
-        }
-        if clientPeerID, ok := queryDetails["Sender Address"].(string); ok {
-            msg.Sender = clientPeerID
-        } else {
-            logger.Warn("Client peer ID not found or it is not a string")
-        }
+	} else {
+		queryDetails, err := FetchQueryDetails(msg.Uqid, gm)
+		if err != nil {
+			logger.Errorf("Error fetching query details: %v", err)
+		}
+		if clientPeerID, ok := queryDetails["Sender Address"].(string); ok {
+			msg.Sender = clientPeerID
+		} else {
+			logger.Warn("Client peer ID not found or it is not a string")
+		}
 
-        msg.State = &common.QueryState{State: common.QueryState_COMPLETED}
-        UpdateQueryState(msg, common.QueryState_COMPLETED, gm)
-        StoreResults(msg, uniqueResults, gm)
+		msg.State = &common.QueryState{State: common.QueryState_COMPLETED}
+		UpdateQueryState(msg, common.QueryState_COMPLETED, gm)
+		StoreResults(msg, uniqueResults, gm)
 
-        clientPeerID, err := peer.Decode(msg.Sender)
-        if err != nil {
-            logger.Errorf("Error decoding client peer ID: %v", err)
-            return
-        }
-        logger.Infof("Originator peer %s sending %d rows to client %s", kadDHT.Host().ID(), len(uniqueResults), clientPeerID)
+		clientPeerID, err := peer.Decode(msg.Sender)
+		if err != nil {
+			logger.Errorf("Error decoding client peer ID: %v", err)
+			return
+		}
+		logger.Infof("Originator peer %s sending %d rows to client %s", kadDHT.Host().ID(), len(uniqueResults), clientPeerID)
 		helpers.SendMergedResultWithPeers(parentStream, clientPeerID, uniqueResults, finalHeader, peerIDList(respondingPeerIDs), kadDHT)
-    }
+	}
 }
 
 func peerIDList(peerIDs map[string]struct{}) []string {
@@ -735,47 +721,47 @@ func peerIDList(peerIDs map[string]struct{}) []string {
 }
 
 func deduplicateRows(rows [][]interface{}) [][]interface{} {
-    seen := make(map[string]struct{})
-    var unique [][]interface{}
-    for _, row := range rows {
-        // Create a unique key from all fields
-        keyParts := make([]string, len(row))
-        for i, val := range row {
-            keyParts[i] = fmt.Sprintf("%v", val)
-        }
-        key := strings.Join(keyParts, "|")
-        if _, exists := seen[key]; !exists {
-            seen[key] = struct{}{}
-            unique = append(unique, row)
-        }
-    }
-    return unique
+	seen := make(map[string]struct{})
+	var unique [][]interface{}
+	for _, row := range rows {
+		// Create a unique key from all fields
+		keyParts := make([]string, len(row))
+		for i, val := range row {
+			keyParts[i] = fmt.Sprintf("%v", val)
+		}
+		key := strings.Join(keyParts, "|")
+		if _, exists := seen[key]; !exists {
+			seen[key] = struct{}{}
+			unique = append(unique, row)
+		}
+	}
+	return unique
 }
 
 // Helper to filter out header rows from results
 func filterHeaderRows(rows [][]interface{}, header []string) [][]interface{} {
-    var filtered [][]interface{}
-    for _, row := range rows {
-        if len(header) > 0 && len(row) == len(header) && isHeaderRow(row, header) {
-            continue
-        }
+	var filtered [][]interface{}
+	for _, row := range rows {
+		if len(header) > 0 && len(row) == len(header) && isHeaderRow(row, header) {
+			continue
+		}
 		filtered = append(filtered, row)
-    }
+	}
 	logger.Debug("The filtered rows are: ", filtered)
-    return filtered
+	return filtered
 }
 
 // Check if a row matches the header
 func isHeaderRow(row []interface{}, header []string) bool {
-    if len(row) != len(header) {
-        return false
-    }
-    for i, val := range row {
-        if fmt.Sprintf("%v", val) != header[i] {
-            return false
-        }
-    }
-    return true
+	if len(row) != len(header) {
+		return false
+	}
+	for i, val := range row {
+		if fmt.Sprintf("%v", val) != header[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Function to decide on to continue or stop broadcasting the query. To proceed, the query must not be in a completed state and the TTL must be greater than 0
@@ -806,9 +792,9 @@ func ShouldContinueBroadcastingQuery(msg *common.QueryMessage, gm *graph.Manager
 		return false
 	}
 
-	return 	state != int32(common.QueryState_COMPLETED) && 
-			state != int32(common.QueryState_SENT_BACK) && 
-			msg.Ttl >= 0 // Continue broadcasting
+	return state != int32(common.QueryState_COMPLETED) &&
+		state != int32(common.QueryState_SENT_BACK) &&
+		msg.Ttl >= 0 // Continue broadcasting
 }
 
 // Function to update the TTL in the graph database
@@ -825,7 +811,7 @@ func UpdateTTL(msg *common.QueryMessage, gm *graph.Manager) error {
 	queryNode := data.NewGraphNode()
 	queryNode.SetAttr("key", msg.Uqid)
 	queryNode.SetAttr("kind", "Query")
-	queryNode.SetAttr("ttl", float64(newTTL)) 
+	queryNode.SetAttr("ttl", float64(newTTL))
 
 	// Update only the TTL attribute of existing query node
 	if err := trans.UpdateNode("main", queryNode); err != nil {
@@ -862,16 +848,16 @@ func RunIDSSQuery(command string, peer peer.ID, gm *graph.Manager) ([][]interfac
 		return nil, nil, err
 	}
 	// Filter out metadata rows and keep only actual values
-	
+
 	header := result.Header().Labels()
 	for i, h := range header {
-        parts := strings.FieldsFunc(h, func(r rune) bool { return r == ':' || r == ' ' })
-        if len(parts) > 0 {
+		parts := strings.FieldsFunc(h, func(r rune) bool { return r == ':' || r == ' ' })
+		if len(parts) > 0 {
 			header[i] = strings.Title(parts[len(parts)-1])
-        }
-    }
-	
-    var dataRows [][]interface{}
+		}
+	}
+
+	var dataRows [][]interface{}
 	for _, row := range result.Rows() {
 		if len(row) == 0 || helpers.IsMetadataRow(row[0]) {
 			continue
@@ -880,11 +866,11 @@ func RunIDSSQuery(command string, peer peer.ID, gm *graph.Manager) ([][]interfac
 	}
 
 	// Apply WITH clauses (e.g., ordering) if present
-    if withClauses != nil {
+	if withClauses != nil {
 		logger.Infof("Applying WITH clauses: %v with header: %v", withClauses, header)
-        dataRows = helpers.ApplyWithClauses(dataRows, header, withClauses)
-    }
-	
+		dataRows = helpers.ApplyWithClauses(dataRows, header, withClauses)
+	}
+
 	logger.Infof("Query result - Header: %v, Data Rows: %d", header, len(dataRows))
 	logger.Infof("Query result - Header: %v, Data Rows: %d, First Row: %v", header, len(dataRows), dataRows[0])
 	return dataRows, header, nil
@@ -908,9 +894,13 @@ func RunIDSSQueryWithDecision(command string, peer peer.ID, gm *graph.Manager, d
 func LocalSettlementTotals(gm *graph.Manager, hostID peer.ID, from time.Time, to time.Time) (float64, float64, error) {
 	period := fmt.Sprintf(` where timeStamp >= "%s" and timeStamp <= "%s"`, from.Format(time.RFC3339), to.Format(time.RFC3339))
 	meterRows, meterHeader, err := RunIDSSQuery("get MeterReading"+period, hostID, gm)
-	if err != nil { return 0, 0, fmt.Errorf("querying meter readings: %v", err) }
+	if err != nil {
+		return 0, 0, fmt.Errorf("querying meter readings: %v", err)
+	}
 	tradeRows, tradeHeader, err := RunIDSSQuery("get Trade"+period, hostID, gm)
-	if err != nil { return 0, 0, fmt.Errorf("querying trades: %v", err) }
+	if err != nil {
+		return 0, 0, fmt.Errorf("querying trades: %v", err)
+	}
 	return sumColumn(meterRows, meterHeader, "Value"), sumColumn(tradeRows, tradeHeader, "Volume"), nil
 }
 
@@ -919,7 +909,9 @@ func CompileSettlement(gm *graph.Manager, kadDHT *dht.IpfsDHT, from time.Time, t
 	host := kadDHT.Host()
 	results := []*common.SettlementResult{}
 	meterSum, tradeSum, err := LocalSettlementTotals(gm, host.ID(), from, to)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	results = append(results, &common.SettlementResult{PeerId: host.ID().String(), MeterReadingSum: meterSum, TradeVolumeSum: tradeSum})
 	for _, remotePeer := range kadDHT.RoutingTable().ListPeers() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -927,12 +919,16 @@ func CompileSettlement(gm *graph.Manager, kadDHT *dht.IpfsDHT, from time.Time, t
 		if err == nil {
 			request := &common.QueryMessage{Type: common.MessageType_SETTLEMENT_REQUEST, SettlementRequest: &common.SettlementRequest{From: from.Format(time.RFC3339), To: to.Format(time.RFC3339)}}
 			payload, marshalErr := proto.Marshal(request)
-			if marshalErr == nil { err = helpers.WriteDelimitedMessage(stream, payload) }
+			if marshalErr == nil {
+				err = helpers.WriteDelimitedMessage(stream, payload)
+			}
 			if err == nil {
 				responseData, readErr := helpers.ReadDelimitedMessage(stream, ctx)
 				if readErr == nil {
 					response := &common.QueryMessage{}
-					if proto.Unmarshal(responseData, response) == nil && response.SettlementResult != nil { results = append(results, response.SettlementResult) }
+					if proto.Unmarshal(responseData, response) == nil && response.SettlementResult != nil {
+						results = append(results, response.SettlementResult)
+					}
 				}
 			}
 			stream.Close()
@@ -948,7 +944,9 @@ func CompileSettlement(gm *graph.Manager, kadDHT *dht.IpfsDHT, from time.Time, t
 		summary.SetAttr("to", to.Format(time.RFC3339))
 		summary.SetAttr("meterReadingSum", result.MeterReadingSum)
 		summary.SetAttr("tradeVolumeSum", result.TradeVolumeSum)
-		if err := gm.StoreNode("main", summary); err != nil { return fmt.Errorf("storing settlement summary: %v", err) }
+		if err := gm.StoreNode("main", summary); err != nil {
+			return fmt.Errorf("storing settlement summary: %v", err)
+		}
 	}
 	logger.Infof("Compiled %d settlement summaries", len(results))
 	return nil
@@ -956,10 +954,24 @@ func CompileSettlement(gm *graph.Manager, kadDHT *dht.IpfsDHT, from time.Time, t
 
 func sumColumn(rows [][]interface{}, header []string, name string) float64 {
 	index := -1
-	for position, label := range header { if strings.EqualFold(label, name) { index = position; break } }
-	if index < 0 { return 0 }
+	for position, label := range header {
+		if strings.EqualFold(label, name) {
+			index = position
+			break
+		}
+	}
+	if index < 0 {
+		return 0
+	}
 	var total float64
-	for _, row := range rows { if index < len(row) { value, err := strconv.ParseFloat(fmt.Sprint(row[index]), 64); if err == nil { total += value } } }
+	for _, row := range rows {
+		if index < len(row) {
+			value, err := strconv.ParseFloat(fmt.Sprint(row[index]), 64)
+			if err == nil {
+				total += value
+			}
+		}
+	}
 	return total
 }
 
@@ -976,7 +988,7 @@ func UpdateQueryState(msg *common.QueryMessage, state common.QueryState_State, g
 	}
 }
 
-// Function to store the results in the graph database in each peer. 
+// Function to store the results in the graph database in each peer.
 // This creates a new node for the results to separate them from the query node
 func StoreResults(msg *common.QueryMessage, results [][]interface{}, gm *graph.Manager) {
 	// Convert results into JSON
