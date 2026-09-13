@@ -51,11 +51,10 @@ import (
 
 	"github.com/ipfs/go-log/v2"
 
+	"github.com/krotik/eliasdb/eql"
 	"github.com/krotik/eliasdb/graph"
 	"github.com/krotik/eliasdb/graph/data"
 	"github.com/krotik/eliasdb/graph/graphstorage"
-	"github.com/krotik/eliasdb/eql"
-	
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -82,21 +81,32 @@ type OverlayMetrics struct {
 var (
 	activeConnections int64
 	logger            = common.Logger
-	msg common.QueryMessage 
+	msg               common.QueryMessage
 )
 
 // Pprof for profiling and resource monitoring
 func init() {
-    go func() {
-        logger.Info("Starting pprof server on :6060") 
-        logger.Info(http.ListenAndServe("localhost:6060", nil))
-		//Visit http://localhost:6060/debug/pprof/ to view the pprof server
-    }()
-	go func() {
-		logger.Info("Starting Prometheus metrics server on :2112")
-		http.HandleFunc("/metrics", metricsHandler)
-		logger.Info(http.ListenAndServe(":2112", nil))
-	}()
+	pprofAddr := os.Getenv("IDSS_PPROF_ADDR")
+	if pprofAddr != "" {
+		go func() {
+			logger.Infof("Starting pprof server on %s", pprofAddr)
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				logger.Errorf("pprof server stopped: %v", err)
+			}
+		}()
+	}
+
+	metricsAddr := os.Getenv("IDSS_METRICS_ADDR")
+	if metricsAddr != "" {
+		go func() {
+			metricsMux := http.NewServeMux()
+			metricsMux.HandleFunc("/metrics", metricsHandler)
+			logger.Infof("Starting Prometheus metrics server on %s", metricsAddr)
+			if err := http.ListenAndServe(metricsAddr, metricsMux); err != nil {
+				logger.Errorf("metrics server stopped: %v", err)
+			}
+		}()
+	}
 }
 
 func metricsHandler(writer http.ResponseWriter, request *http.Request) {
@@ -165,9 +175,11 @@ func GatherOverlayMetrics(h host.Host, kadDHT *dht.IpfsDHT, pingCount int) []Ove
 	return metrics
 }
 
-/*=====================
+/*
+=====================
 MAIN FUNCTION
-=====================*/
+=====================
+*/
 func main() {
 	log.SetLogLevel("IDSS", "info") // Change to debug for more verbose logging
 
@@ -200,7 +212,7 @@ func main() {
 		libp2p.ResourceManager(rm), // Added for balancing
 		libp2p.Identity(priv),
 		libp2p.ListenAddrs(listenAddr),
-		libp2p.Security(noise.ID, noise.New),// Ensure secure communication
+		libp2p.Security(noise.ID, noise.New), // Ensure secure communication
 	)
 	if err != nil {
 		logger.Fatalf("Error creating libp2p host: %v", err)
@@ -242,12 +254,12 @@ func main() {
 	/**********************
 
 		Graph database operations using EliasDB. This must be affected in all the joining peers for efficient querying.
-		Calling functions from idss_db_init.go to create the database nodes and edges. Note that, this process 
-		involves generating random data using generate_data.py. This python script is used to generate 
-		random data for the graph database. The data is stored in a JSON file which is then used to create 
+		Calling functions from idss_db_init.go to create the database nodes and edges. Note that, this process
+		involves generating random data using generate_data.py. This python script is used to generate
+		random data for the graph database. The data is stored in a JSON file which is then used to create
 		the nodes and edges in the graph database.
 
-		Before generating the data, the graph database env must be created. This is done by creating a path, 
+		Before generating the data, the graph database env must be created. This is done by creating a path,
 		storage instance and graph manager. This code already handles the process.
 
 	************************/
@@ -294,14 +306,14 @@ func main() {
 	}()
 
 	// Handle streams
-	host.SetStreamHandler(protocol.ID(config.ProtocolID), func(stream network.Stream) { 
+	host.SetStreamHandler(protocol.ID(config.ProtocolID), func(stream network.Stream) {
 		atomic.AddInt64(&activeConnections, 1)
 		defer atomic.AddInt64(&activeConnections, -1) // decrement when the handler exits
 		go handleRequest(stream, stream.Conn().RemotePeer().String(), ctx, config, graphManager, kadDHT, host, accessPolicy)
 	})
 
 	// Handle SIGTERM and interrupt signals
-	go func() { handleInterrupts(host, graphDB, kadDHT) }()	
+	go func() { handleInterrupts(host, graphDB, kadDHT) }()
 
 	// Keep the server running
 	select {}
@@ -320,7 +332,7 @@ func handleInterrupts(host host.Host, graphDB graphstorage.Storage, kadDHT *dht.
 	})
 
 	go func() {
-		defer func ()  {
+		defer func() {
 			cleanup(graphDB, host)
 			// Clean up
 			if err := host.Close(); err != nil {
@@ -329,7 +341,6 @@ func handleInterrupts(host host.Host, graphDB graphstorage.Storage, kadDHT *dht.
 			}
 			os.Exit(0) // normal termination
 		}()
-
 
 		sig := <-c
 		logger.Infof("Received signal: %s. Peer exiting the network: %s", sig, host.ID().String())
@@ -348,7 +359,7 @@ func cleanup(graphDB graphstorage.Storage, host host.Host) {
 	}
 
 	peerDir := filepath.Join(common.DB_PATH, host.ID().String())
-	if err := os.RemoveAll(peerDir); err != nil { 
+	if err := os.RemoveAll(peerDir); err != nil {
 		logger.Error("Error deleting database: ", err)
 	}
 }
@@ -391,7 +402,7 @@ func handleRequest(conn network.Stream, remotePeerID string, ctx context.Context
 			handleSettlementRequest(conn, &msg, gm, host)
 			continue
 		}
-		if msg.Type == common.MessageType_QUERY{
+		if msg.Type == common.MessageType_QUERY {
 			handleQuery(conn, &msg, remotePeerID, config, gm, kadDHT, host, accessPolicy)
 		}
 	}
@@ -450,7 +461,7 @@ func handleQuery(conn network.Stream, msg *common.QueryMessage, remotePeerID str
 		helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error())
 		return
 	}
-	
+
 	duplicateQuery, err := broadcast.CheckDuplicateQuery(msg.Uqid, gm) // with gm, we check queries in the graph database for this peer
 	if err != nil {
 		logger.Errorf("Error checking duplicate query: %v", err)
@@ -473,8 +484,8 @@ func handleQuery(conn network.Stream, msg *common.QueryMessage, remotePeerID str
 	}
 	logger.Infof("This is a new query on this peer")
 	logger.Infof("\nReceiver %s \nUQI: %s\nTTL: %f \nFrom: %s\nRequester: %s (%s)", kadDHT.Host().ID(), msg.Uqid, msg.Ttl, remotePeerID, msg.RequesterId, msg.RequesterRole) // for debugging
-	msg.State = &common.QueryState{State: common.QueryState_QUEUED} // Set the query state to QUEUED
-	broadcast.StoreQueryInfo(msg, gm, remotePeerID) // Store the query info in the graph database
+	msg.State = &common.QueryState{State: common.QueryState_QUEUED}                                                                                                          // Set the query state to QUEUED
+	broadcast.StoreQueryInfo(msg, gm, remotePeerID)                                                                                                                          // Store the query info in the graph database
 	if strings.HasPrefix(queryLower, "settle ") {
 		handleSettlementCommand(conn, msg, remotePeerID, config, gm, kadDHT)
 		return
@@ -485,68 +496,67 @@ func handleQuery(conn network.Stream, msg *common.QueryMessage, remotePeerID str
 		strings.Contains(queryLower, "-local") ||
 		strings.Contains(queryLower, "add") ||
 		strings.Contains(queryLower, "update") ||
-		strings.Contains(queryLower, "delete"){
-			logger.Info("Handling a local query")
-			if (strings.HasPrefix(strings.ToLower(msg.Query), "add")){
-				key, err := handleAddQuery(queryTrimmed, gm)
-				if err != nil {
-					logger.Errorf("Error handling add query: %v", err)
-					helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error())
-					return
-				}
-				successMsg := fmt.Sprintf("Node %s added successfully", key)
-				logger.Infof(successMsg)
-				sendSuccessMessage(conn, remotePeerID, successMsg, kadDHT)
-				return // Do not broadcast
-			}else if(strings.HasPrefix(queryTrimmed, "delete")){
-				logger.Info("Handling a delete query")
-				key, err := handleDeleteQuery(queryTrimmed, gm)
-				if err != nil {
-					logger.Errorf("Error handling delete query: %v", err)
-					helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error())
-					return
-				}
-				successMsg := fmt.Sprintf("Node %s deleted successfully", key)
-				logger.Infof(successMsg)
-				sendSuccessMessage(conn, remotePeerID, successMsg, kadDHT)
-				return // Do not broadcast
-			}else if(strings.HasPrefix(queryTrimmed, "update")){
-				logger.Info("Handling an update query")
-
-				key, err := handleUpdateQuery(queryTrimmed, gm)
-				if err != nil {
-					logger.Errorf("Error handling update query: %v", err)
-					helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error())
-					return
-				}
-				successMsg := fmt.Sprintf("Node %s updated successfully", key)
-				logger.Infof(successMsg)
-				sendSuccessMessage(conn, remotePeerID, successMsg, kadDHT)
-				return // Do not broadcast
-			}else{
-
-				// Remove the -l or -local flag from the query
-				msg.Query = strings.Replace(msg.Query, "-local", "", -1)
-				msg.Query = strings.Replace(msg.Query, "-l", "", -1)
-				msg.Query = strings.TrimSpace(msg.Query)
-				
-				
-				// Execute the query locally
-				results, header, err := broadcast.RunIDSSQueryWithDecision(msg.Query, host.ID(), gm, decision)
-				if err != nil {
-					logger.Errorf("Error executing local query: %v", err)
-					// Send an error message back to the client
-					helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error())
-					return
-				}
-
-				// Send the results back to the client
-				logger.Infof("Local query results - Header: %v, Rows: %d", header, len(results))
-				
-				helpers.SendMergedResult(conn, peer.ID(remotePeerID), results, header, kadDHT)
-				logger.Infof("Local query executed successfully")
+		strings.Contains(queryLower, "delete") {
+		logger.Info("Handling a local query")
+		if strings.HasPrefix(strings.ToLower(msg.Query), "add") {
+			key, err := handleAddQuery(queryTrimmed, gm)
+			if err != nil {
+				logger.Errorf("Error handling add query: %v", err)
+				helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error())
 				return
 			}
+			successMsg := fmt.Sprintf("Node %s added successfully", key)
+			logger.Infof(successMsg)
+			sendSuccessMessage(conn, remotePeerID, successMsg, kadDHT)
+			return // Do not broadcast
+		} else if strings.HasPrefix(queryTrimmed, "delete") {
+			logger.Info("Handling a delete query")
+			key, err := handleDeleteQuery(queryTrimmed, gm)
+			if err != nil {
+				logger.Errorf("Error handling delete query: %v", err)
+				helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error())
+				return
+			}
+			successMsg := fmt.Sprintf("Node %s deleted successfully", key)
+			logger.Infof(successMsg)
+			sendSuccessMessage(conn, remotePeerID, successMsg, kadDHT)
+			return // Do not broadcast
+		} else if strings.HasPrefix(queryTrimmed, "update") {
+			logger.Info("Handling an update query")
+
+			key, err := handleUpdateQuery(queryTrimmed, gm)
+			if err != nil {
+				logger.Errorf("Error handling update query: %v", err)
+				helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error())
+				return
+			}
+			successMsg := fmt.Sprintf("Node %s updated successfully", key)
+			logger.Infof(successMsg)
+			sendSuccessMessage(conn, remotePeerID, successMsg, kadDHT)
+			return // Do not broadcast
+		} else {
+
+			// Remove the -l or -local flag from the query
+			msg.Query = strings.Replace(msg.Query, "-local", "", -1)
+			msg.Query = strings.Replace(msg.Query, "-l", "", -1)
+			msg.Query = strings.TrimSpace(msg.Query)
+
+			// Execute the query locally
+			results, header, err := broadcast.RunIDSSQueryWithDecision(msg.Query, host.ID(), gm, decision)
+			if err != nil {
+				logger.Errorf("Error executing local query: %v", err)
+				// Send an error message back to the client
+				helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error())
+				return
+			}
+
+			// Send the results back to the client
+			logger.Infof("Local query results - Header: %v, Rows: %d", header, len(results))
+
+			helpers.SendMergedResult(conn, peer.ID(remotePeerID), results, header, kadDHT)
+			logger.Infof("Local query executed successfully")
+			return
+		}
 	}
 
 	if decision == access.Deny {
@@ -554,12 +564,11 @@ func handleQuery(conn network.Stream, msg *common.QueryMessage, remotePeerID str
 		return
 	}
 
-	if (
-		strings.Contains(msg.Query, "@avg(") ||
+	if (strings.Contains(msg.Query, "@avg(") ||
 		strings.Contains(msg.Query, "@min(") ||
 		strings.Contains(msg.Query, "@max(") ||
 		strings.Contains(msg.Query, "@sum(")) &&
-		!strings.Contains(msg.Query, "@count("){
+		!strings.Contains(msg.Query, "@count(") {
 		broadcast.HandleAggregateQuery(conn, msg, config, gm, kadDHT, helpers.ParseAggregates(msg.Query)[0])
 		return
 	}
@@ -590,7 +599,9 @@ func broadcastCustomerRegistrations(ctx context.Context, host host.Host, config 
 			if err == nil {
 				err = helpers.WriteDelimitedMessage(stream, payload)
 			}
-			if err != nil { logger.Errorf("Error sending customer registration: %v", err) }
+			if err != nil {
+				logger.Errorf("Error sending customer registration: %v", err)
+			}
 		}
 		stream.Close()
 	}
@@ -602,21 +613,48 @@ func handleSettlementCommand(conn network.Stream, msg *common.QueryMessage, remo
 		return
 	}
 	parts := strings.Fields(msg.Query)
-	if len(parts) != 3 { helpers.SendErrorMessage(conn, peer.ID(remotePeerID), "invalid settle command: expected settle <from> <to>"); return }
-	from, err := time.Parse(time.RFC3339, parts[1]); if err != nil { helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error()); return }
-	to, err := time.Parse(time.RFC3339, parts[2]); if err != nil { helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error()); return }
-	if err := broadcast.CompileSettlement(gm, kadDHT, from, to); err != nil { helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error()); return }
+	if len(parts) != 3 {
+		helpers.SendErrorMessage(conn, peer.ID(remotePeerID), "invalid settle command: expected settle <from> <to>")
+		return
+	}
+	from, err := time.Parse(time.RFC3339, parts[1])
+	if err != nil {
+		helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error())
+		return
+	}
+	to, err := time.Parse(time.RFC3339, parts[2])
+	if err != nil {
+		helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error())
+		return
+	}
+	if err := broadcast.CompileSettlement(gm, kadDHT, from, to); err != nil {
+		helpers.SendErrorMessage(conn, peer.ID(remotePeerID), err.Error())
+		return
+	}
 	sendSuccessMessage(conn, remotePeerID, "Settlement summaries compiled", kadDHT)
 }
 
 func handleSettlementRequest(conn network.Stream, msg *common.QueryMessage, gm *graph.Manager, host host.Host) {
-	if msg.SettlementRequest == nil { return }
-	from, err := time.Parse(time.RFC3339, msg.SettlementRequest.From); if err != nil { return }
-	to, err := time.Parse(time.RFC3339, msg.SettlementRequest.To); if err != nil { return }
+	if msg.SettlementRequest == nil {
+		return
+	}
+	from, err := time.Parse(time.RFC3339, msg.SettlementRequest.From)
+	if err != nil {
+		return
+	}
+	to, err := time.Parse(time.RFC3339, msg.SettlementRequest.To)
+	if err != nil {
+		return
+	}
 	meterSum, tradeSum, err := broadcast.LocalSettlementTotals(gm, host.ID(), from, to)
-	if err != nil { logger.Errorf("Error computing settlement totals: %v", err); return }
+	if err != nil {
+		logger.Errorf("Error computing settlement totals: %v", err)
+		return
+	}
 	payload, err := proto.Marshal(&common.QueryMessage{Type: common.MessageType_SETTLEMENT_RESULT, SettlementResult: &common.SettlementResult{PeerId: host.ID().String(), MeterReadingSum: meterSum, TradeVolumeSum: tradeSum}})
-	if err == nil { _ = helpers.WriteDelimitedMessage(conn, payload) }
+	if err == nil {
+		_ = helpers.WriteDelimitedMessage(conn, payload)
+	}
 }
 
 func isDataModification(query string) bool {
@@ -629,128 +667,128 @@ func isValidRequesterRole(role string) bool {
 
 // Function to send a success message back to the client
 func sendSuccessMessage(conn network.Stream, remotePeerID string, message string, kadDHT *dht.IpfsDHT) {
-    // Create a simple result with the success message
-    results := [][]interface{}{
-        {"Status"},
-        {message},
-    }
-    header := []string{"Status"}
-    helpers.SendMergedResult(conn, peer.ID(remotePeerID), results, header, kadDHT)
+	// Create a simple result with the success message
+	results := [][]interface{}{
+		{"Status"},
+		{message},
+	}
+	header := []string{"Status"}
+	helpers.SendMergedResult(conn, peer.ID(remotePeerID), results, header, kadDHT)
 }
 
 // Function to handle update nodes in the graph database
 func handleUpdateQuery(query string, gm *graph.Manager) (string, error) {
-    // Example query: "update Client 15 name='John Doe' power=300"
-    query = strings.TrimSpace(strings.TrimPrefix(query, "update"))
-    parts := strings.Fields(query)
-    if len(parts) < 2 {
-        return "", fmt.Errorf("invalid update query format: expected 'update <kind> <key> [attributes]'")
-    }
+	// Example query: "update Client 15 name='John Doe' power=300"
+	query = strings.TrimSpace(strings.TrimPrefix(query, "update"))
+	parts := strings.Fields(query)
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid update query format: expected 'update <kind> <key> [attributes]'")
+	}
 
-    kind := parts[0]
-    key := parts[1]
+	kind := parts[0]
+	key := parts[1]
 	attrStart := strings.Index(query, key) + len(key)
-    attrString := strings.TrimSpace(query[attrStart:])
-    attributes := extractAttributes(attrString)
+	attrString := strings.TrimSpace(query[attrStart:])
+	attributes := extractAttributes(attrString)
 
 	logger.Infof("Kind: %s, Key: %s, Attributes: %v", kind, key, attributes)
 
-    graphNode := data.NewGraphNode()
-    graphNode.SetAttr("key", key)
-    graphNode.SetAttr("kind", kind)
+	graphNode := data.NewGraphNode()
+	graphNode.SetAttr("key", key)
+	graphNode.SetAttr("kind", kind)
 
-    for k, v := range attributes {
-        graphNode.SetAttr(k, v)
-    }
+	for k, v := range attributes {
+		graphNode.SetAttr(k, v)
+	}
 
 	if err := gm.UpdateNode("main", graphNode); err != nil {
-        return "", fmt.Errorf("failed to update node: %v", err)
-    }
+		return "", fmt.Errorf("failed to update node: %v", err)
+	}
 
-    return key, nil
+	return key, nil
 }
 
 // Function to handle deletion of nodes from the graph database
 func handleDeleteQuery(query string, gm *graph.Manager) (string, error) {
-    // Example query: "delete Client 15"
-    query = strings.TrimSpace(strings.TrimPrefix(query, "delete"))
-    parts := strings.Fields(query)
-    if len(parts) < 2 {
-        return "", fmt.Errorf("invalid delete query format: expected 'delete <kind> <key>'")
-    }
+	// Example query: "delete Client 15"
+	query = strings.TrimSpace(strings.TrimPrefix(query, "delete"))
+	parts := strings.Fields(query)
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid delete query format: expected 'delete <kind> <key>'")
+	}
 
-    kind := parts[0]
-    key := parts[1]
+	kind := parts[0]
+	key := parts[1]
 	logger.Infof("Attempting to delete node - Kind: %s, Key: %s", kind, key)
 
 	// Verify node exists before deletion
-    checkQuery := fmt.Sprintf("get %s where key = '%s'", kind, key)
-    result, err := eql.RunQuery("checkNode", "main", checkQuery, gm)
-    if err != nil || len(result.Rows()) == 0 {
-        logger.Warnf("Node with kind %s and key %s not found", kind, key)
-        return "", fmt.Errorf("node with key %s not found", key)
-    }
+	checkQuery := fmt.Sprintf("get %s where key = '%s'", kind, key)
+	result, err := eql.RunQuery("checkNode", "main", checkQuery, gm)
+	if err != nil || len(result.Rows()) == 0 {
+		logger.Warnf("Node with kind %s and key %s not found", kind, key)
+		return "", fmt.Errorf("node with key %s not found", key)
+	}
 	logger.Infof("Node found - Rows: %d", len(result.Rows()))
 
-    trans := graph.NewGraphTrans(gm)
+	trans := graph.NewGraphTrans(gm)
 	if err := trans.RemoveNode("main", key, kind); err != nil {
 		logger.Errorf("Error deleting node: %v", err)
-        return "", fmt.Errorf("failed to delete node: %v", err)
-    }
+		return "", fmt.Errorf("failed to delete node: %v", err)
+	}
 
 	if err := trans.Commit(); err != nil {
-        logger.Errorf("Failed to commit deletion of key %s: %v", key, err)
-        return "", fmt.Errorf("failed to commit deletion: %v", err)
-    }
+		logger.Errorf("Failed to commit deletion of key %s: %v", key, err)
+		return "", fmt.Errorf("failed to commit deletion: %v", err)
+	}
 
 	logger.Infof("Node %s deleted successfully", key)
-    return key, nil
+	return key, nil
 }
 
 // Function to handle addition of nodes to the graph database
 func handleAddQuery(query string, gm *graph.Manager) (string, error) {
 	// Example query: "add Client 15 name='John Mandili' contract_number=35435 power=255"
-    query = strings.TrimSpace(strings.TrimPrefix(query, "add"))
-    parts := strings.Fields(query)
-    if len(parts) < 2 {
-        return "", fmt.Errorf("invalid add query format: expected 'add <kind> <key> [attributes]'") 
-    }
+	query = strings.TrimSpace(strings.TrimPrefix(query, "add"))
+	parts := strings.Fields(query)
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid add query format: expected 'add <kind> <key> [attributes]'")
+	}
 
-    kind := parts[0]
-    key := parts[1]
+	kind := parts[0]
+	key := parts[1]
 	attrStart := strings.Index(query, key) + len(key)
-    attrString := strings.TrimSpace(query[attrStart:])
-    attributes := extractAttributes(attrString)
+	attrString := strings.TrimSpace(query[attrStart:])
+	attributes := extractAttributes(attrString)
 
 	logger.Infof("Kind: %s, Key: %s, Attributes: %v", kind, key, attributes)
 
-    //trans := graph.NewGraphTrans(gm)
-    graphNode := data.NewGraphNode()
-    graphNode.SetAttr("key", key)
-    graphNode.SetAttr("kind", kind)
+	//trans := graph.NewGraphTrans(gm)
+	graphNode := data.NewGraphNode()
+	graphNode.SetAttr("key", key)
+	graphNode.SetAttr("kind", kind)
 
-    for k, v := range attributes {
-        graphNode.SetAttr(k, v)
-    }
+	for k, v := range attributes {
+		graphNode.SetAttr(k, v)
+	}
 
 	if err := gm.StoreNode("main", graphNode); err != nil {
-        return "", fmt.Errorf("failed to store node: %v", err)
-    }
-    return key, nil
+		return "", fmt.Errorf("failed to store node: %v", err)
+	}
+	return key, nil
 }
 
 // Helper function to extract attributes from a query string
 func extractAttributes(query string) map[string]string {
-    attrRegex := regexp.MustCompile(`(\w[\w\s]*)\s*=\s*("[^"]*"|\S+)`)
-    attrMatches := attrRegex.FindAllStringSubmatch(query, -1)
-    attributes := make(map[string]string)
+	attrRegex := regexp.MustCompile(`(\w[\w\s]*)\s*=\s*("[^"]*"|\S+)`)
+	attrMatches := attrRegex.FindAllStringSubmatch(query, -1)
+	attributes := make(map[string]string)
 
-    for _, match := range attrMatches {
-        attrKey := strings.TrimSpace(match[1])
-        attrValue := strings.Trim(match[2], "\"")
-        attributes[attrKey] = attrValue
-    }
-    return attributes
+	for _, match := range attrMatches {
+		attrKey := strings.TrimSpace(match[1])
+		attrValue := strings.Trim(match[2], "\"")
+		attributes[attrKey] = attrValue
+	}
+	return attributes
 }
 
 // Function to check for errors

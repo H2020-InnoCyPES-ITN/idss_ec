@@ -2,7 +2,6 @@
 """
 Generate deterministic energy-community graph data for an IDSS peer.
 
-Copyright 2023-2027, University of Salento, Italy.
 All rights reserved.
 """
 

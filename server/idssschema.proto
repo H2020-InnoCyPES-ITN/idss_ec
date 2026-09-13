@@ -13,11 +13,11 @@ package common;
 option go_package = "idss/graphdb/common"; // The package name for the generated Go code
 
 enum MessageType {
-    QUERY = 0;
-    RESULT = 1;
-    CUSTOMER_REGISTRATION = 2;
-    SETTLEMENT_REQUEST = 3;
-    SETTLEMENT_RESULT = 4;
+    QUERY = 0; // A query message
+    RESULT = 1; // A result message
+    CUSTOMER_REGISTRATION = 2; // A customer registration message
+    SETTLEMENT_REQUEST = 3; // A settlement request message
+    SETTLEMENT_RESULT = 4; // A settlement result message
 }
 
 // QueryMessage represents a query being propagated in the network
@@ -36,29 +36,29 @@ message QueryMessage {
     int32 record_count = 12; // Number of records in the result
     string requester_id = 13; // Peer ID of the submitting client
     string requester_role = 14; // member, manager, or observer
-    CustomerRegistration customer_registration = 15;
-    SettlementRequest settlement_request = 16;
-    SettlementResult settlement_result = 17;
-    repeated string responding_peer_ids = 18;
+    CustomerRegistration customer_registration = 15; // The customer registration details
+    SettlementRequest settlement_request = 16; // The settlement request details
+    SettlementResult settlement_result = 17; // The result of the settlement request
+    repeated string responding_peer_ids = 18; // List of peer IDs that have responded to the query
 }
 
 message CustomerRegistration {
-    string mrid = 1;
-    string name = 2;
-    string role = 3;
-    string membership_status = 4;
-    string contract_number = 5;
+    string mrid = 1; // The market participant ID
+    string name = 2; // The name of the customer
+    string role = 3; // The role of the customer (e.g., member, manager, observer)
+    string membership_status = 4; // The membership status of the customer
+    string contract_number = 5; // The contract number associated with the customer
 }
 
 message SettlementRequest {
-    string from = 1;
-    string to = 2;
+    string from = 1; // The peer ID of the sender
+    string to = 2; // The peer ID of the receiver
 }
 
 message SettlementResult {
-    string peer_id = 1;
-    double meter_reading_sum = 2;
-    double trade_volume_sum = 3;
+    string peer_id = 1; // The peer ID of the node
+    double meter_reading_sum = 2; // The sum of meter readings
+    double trade_volume_sum = 3; // The sum of trade volumes
 }
 
 message QueryState {
