@@ -12,3 +12,12 @@
 # Generated Python bytecode
 server/__pycache__/
 *.py[cod]
+
+# Local experiment/web-console runtime artifacts
+experiments/scaling*
+experiments/web-runtime/launcher*
+experiments/web-runtime/idss-client
+.vscode/settings.json
+
+# Stray local build output
+/web
