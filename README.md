@@ -122,7 +122,7 @@ Use `docker compose down -v` to remove generated peer data. Run the client conta
 docker compose run --rm client -s <server_multiaddress>
 ```
 
-Client XML results are saved to `client/results` on the host.
+Client JSON results are saved to `client/results` on the host.
 
 ## Access Policies
 
@@ -183,7 +183,20 @@ Traversal syntax is `<source role>:<relationship kind>:<destination role>:<desti
 get Customer traverse owner:owns:asset:UsagePoint traverse point:records:reading:MeterReading, 7
 ```
 
-Distributed aggregate functions `@sum`, `@avg`, `@min`, and `@max` are implemented. Query results are written as XML files under `client/results`.
+Distributed result queries may add a local projection and row limit:
+
+```sh
+get Trade fields mRID,volume,price,timeStamp limit 100, 3
+```
+
+Result frames larger than 4 KiB are compressed automatically and large result sets are
+streamed in chunks. Forwarding uses at most four deterministic peers from the local
+DHT routing table, records visited peers in the query, and applies the 0.75 remaining
+time reduction before forwarding. TTL is an end-to-end wall-clock budget in seconds;
+peers stop work when the original deadline expires. Aggregate queries remain preferable
+for large telemetry scans because peers return partial values instead of raw rows.
+
+Distributed aggregate functions `@sum`, `@avg`, `@min`, and `@max` are implemented. Query results are written as JSON files under `client/results`.
 
 ## Metrics and Experiments
 
@@ -195,11 +208,30 @@ Run peer-count and TTL experiments:
 ./experiments/run_scaling.sh <max_peers> <repeats>
 ```
 
-The script runs fixed EC queries from two through `max_peers` peers at adaptive TTL values starting at 1. Each invocation creates a unique UTC directory under `experiments/results/`, so later runs do not overwrite earlier evidence. Each run stores its `scaling.csv`, peer-launch logs, client logs, client XML results, and `metadata.txt`. The cumulative `experiments/results/all-results.csv` appends rows from every run and is the recommended input for publication plots. Each row contains run ID, peer count, query label, TTL, elapsed time, responding peers, and returned rows.
+The script runs fixed EC queries from two through `max_peers` peers at adaptive TTL values starting at 1. Each invocation creates a unique UTC directory under `experiments/results/`, so later runs do not overwrite earlier evidence. Each run stores its `scaling.csv`, `forwarding.csv`, peer-launch logs, client logs, client JSON results, and `metadata.txt`. The cumulative `experiments/results/all-results.csv` appends rows from every run and is the recommended input for publication plots. Each row contains run ID, peer count, query label, TTL, elapsed time, responding peers, and returned rows. `forwarding.csv` records peer-to-peer query sends, intermediate results, and closed streams from server logs.
 
 ### Large-Dataset Experiments
 
 The scaling script changes peer count but uses the generator defaults unless its launcher is extended with dataset options. To test a large dataset per peer, launch the network directly with explicit generator settings, then submit queries from a separate client terminal:
+
+### Web Experiment Console
+
+Start the browser-based experiment controller from the repository root:
+
+```sh
+go run ./experiments/web
+```
+
+Open `http://localhost:8080`. The console adds peers to the currently running set instead of replacing it, configures customers/days/interval size for each added batch, and runs queries while reporting elapsed time, responding peers, and returned rows. The controller stores launcher logs under `experiments/web-runtime/`.
+
+For command-line additive startup, set `PEER_INDEX_OFFSET` to the number of existing peers and preserve their logs:
+
+```sh
+cd server
+PEER_INDEX_OFFSET=20 PRESERVE_EXISTING_LOGS=1 ./start_peers.sh 5 --customers 4 --days 1 --interval-minutes 15
+```
+
+This adds peers 21-25 and leaves peers 1-20 running. Stop managed peers explicitly with `stop_clusters.sh` or the web console; do not use the scaling script for a persistent peer set because it intentionally tears down each experiment.
 
 ```sh
 # Three peers; each peer generates 100 customers and 30 days of 15-minute readings
