@@ -95,7 +95,7 @@ func DiscoverAndConnectPeers(ctx context.Context, host host.Host, config flags.C
 // Function to initialise the DHT and bootstrap the peer with default bootstrap nodes
 func InitialiseDHT(ctx context.Context, host host.Host, config flags.Config) *dht.IpfsDHT {
 	kadDHT, err := dht.New( // Create a new DHT
-		ctx, host, 
+		host,
 		dht.Mode(dht.ModeServer), 
 		dht.ProtocolPrefix("/idss"), // Prefix for the DHT protocol
 		dht.BootstrapPeers(config.BootstrapPeers...), 
