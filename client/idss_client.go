@@ -32,9 +32,11 @@ Usage:
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/binary"
-	"encoding/xml"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"idss/graphdb/common"
@@ -55,7 +57,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	dutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
@@ -68,14 +69,13 @@ var (
 )
 
 type Result struct {
-	XMLName xml.Name `xml:"result"`
-	Data    string   `xml:"data"`
+	Data []string `json:"data"`
 }
 
 type QueryResponse struct {
-	XMLName     xml.Name `xml:"response"`
-	ResultCount int      `xml:"resultCount"`
-	Results     []Result `xml:"results"`
+	ResultCount int        `json:"resultCount"`
+	Header      []string   `json:"header,omitempty"`
+	Rows        [][]string `json:"rows"`
 }
 
 func main() {
@@ -127,7 +127,7 @@ func main() {
 	}
 
 	// Initialize the DHT
-	kademliaDHT, err := dht.New(ctx, host)
+	kademliaDHT, err := dht.New(host)
 	if err != nil {
 		log.Fatal("Error creating DHT:", err)
 	}
@@ -199,14 +199,14 @@ func main() {
 
 		// Create the QueryMessage
 		msg := common.QueryMessage{
-			Uqid:       uqi,
-			Query:      query,
-			Ttl:        float32(ttl),
-			Timestamp:  timestamppb.New(time.Now()).String(),
-			Originator: serverPeer.String(),
-			Type:       common.MessageType_QUERY,
-			Sender:     host.ID().String(),
-			RequesterId: host.ID().String(),
+			Uqid:          uqi,
+			Query:         query,
+			Ttl:           float32(ttl),
+			Timestamp:     time.Now().Add(time.Duration(float64(ttl) * float64(time.Second))).UTC().Format(time.RFC3339Nano),
+			Originator:    serverPeer.String(),
+			Type:          common.MessageType_QUERY,
+			Sender:        host.ID().String(),
+			RequesterId:   host.ID().String(),
 			RequesterRole: *requesterRole,
 		}
 
@@ -244,11 +244,11 @@ func main() {
 
 		for {
 			responseBytes, err := readDelimitedMessage(stream)
-			
+
 			if err != nil {
-                if err == io.EOF || strings.Contains(err.Error(), "EOF") {
-                    break // All chunks received
-                }
+				if err == io.EOF || strings.Contains(err.Error(), "EOF") {
+					break // All chunks received
+				}
 				log.Error("Error reading response chunk from server:", err)
 				break
 			}
@@ -278,7 +278,7 @@ func main() {
 				allRows = append(allRows, data)
 			}
 
-			if part.Type == common.MessageType_RESULT {
+			if part.Type == common.MessageType_RESULT && part.RecordCount >= 0 {
 				break
 			}
 		}
@@ -298,40 +298,35 @@ func main() {
 			log.Infof("Time spent: %s", timeTaken)
 
 			// Check if it's a status message or query result
-			queryResponse := QueryResponse{ResultCount: dataNonHeaders}
+			queryResponse := QueryResponse{ResultCount: dataNonHeaders, Header: header, Rows: allRows}
 			isStatus := len(allRows) == 1 && allRows[0][0] == "Status" // Adjusted for accumulated rows
-
-			if len(header) > 0 {
-				queryResponse.Results = append(queryResponse.Results, Result{Data: strings.Join(header, ",")})
-			}
-
-			for _, row := range allRows {
-				queryResponse.Results = append(queryResponse.Results, Result{Data: strings.Join(row, ",")})
-			}
 
 			if isStatus {
 				// Handle status message
-				statusMsg := queryResponse.Results[1].Data // Assuming header + status
+				statusMsg := strings.Join(queryResponse.Rows[0], " ")
 				log.Infof("Server response: %s", statusMsg)
 			} else {
-				// Handle query result and save XML
-				xmlResponse, err := xml.MarshalIndent(queryResponse, "", "    ")
+				// Handle query result and save structured JSON.
+				jsonResponse, err := json.MarshalIndent(queryResponse, "", "    ")
 				if err != nil {
-					log.Error("Error marshalling XML response:", err)
+					log.Error("Error marshalling JSON response:", err)
 					continue
 				}
 
-				resultsDir := "results"
+				resultsDir := os.Getenv("IDSS_CLIENT_RESULTS_DIR")
+				if resultsDir == "" {
+					resultsDir = "results"
+				}
 				err = os.MkdirAll(resultsDir, os.ModePerm)
 				if err != nil {
 					log.Error("Error creating results directory:", err)
 					continue
 				}
 
-				filename := filepath.Join(resultsDir, fmt.Sprintf("%s.xml", uqi))
-				err = os.WriteFile(filename, xmlResponse, 0644)
+				filename := filepath.Join(resultsDir, fmt.Sprintf("%s.json", uqi))
+				err = os.WriteFile(filename, jsonResponse, 0644)
 				if err != nil {
-					log.Error("Error writing XML response to file:", err)
+					log.Error("Error writing JSON response to file:", err)
 					continue
 				}
 
@@ -343,6 +338,7 @@ func main() {
 }
 
 func writeDelimitedMessage(w io.Writer, data []byte) error {
+	data = encodeFrame(data)
 	sizeBuf := make([]byte, binary.MaxVarintLen64)
 	size := binary.PutUvarint(sizeBuf, uint64(len(data)))
 
@@ -359,18 +355,60 @@ func writeDelimitedMessage(w io.Writer, data []byte) error {
 }
 
 func readDelimitedMessage(r io.Reader) ([]byte, error) {
-	size, err := binary.ReadUvarint(bufio.NewReader(r))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read message size: %w", err)
+	var size uint64
+	for shift := uint(0); ; shift += 7 {
+		if shift >= 64 {
+			return nil, fmt.Errorf("invalid frame length")
+		}
+		var one [1]byte
+		if _, err := io.ReadFull(r, one[:]); err != nil {
+			return nil, err
+		}
+		size |= uint64(one[0]&0x7f) << shift
+		if one[0]&0x80 == 0 {
+			break
+		}
 	}
-
+	if size > 256<<20 {
+		return nil, fmt.Errorf("frame too large: %d bytes", size)
+	}
 	buf := make([]byte, size)
-	_, err = io.ReadFull(r, buf)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read message data: %w", err)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, err
 	}
+	return decodeFrame(buf)
+}
 
-	return buf, nil
+const compressionThreshold = 4096
+
+func encodeFrame(data []byte) []byte {
+	if len(data) < compressionThreshold {
+		return append([]byte{0}, data...)
+	}
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(data); err != nil || writer.Close() != nil || compressed.Len() >= len(data) {
+		return append([]byte{0}, data...)
+	}
+	return append([]byte{1}, compressed.Bytes()...)
+}
+
+func decodeFrame(frame []byte) ([]byte, error) {
+	if len(frame) == 0 {
+		return frame, nil
+	}
+	if frame[0] == 0 {
+		return frame[1:], nil
+	}
+	if frame[0] != 1 {
+		return frame, nil
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(frame[1:]))
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
 }
 
 func handleTerminationSignals(host host.Host) {
@@ -381,7 +419,11 @@ func handleTerminationSignals(host host.Host) {
 		sig := <-c
 		log.Warnf("Received signal: %s. You are exiting the network.", sig)
 
-		err := os.RemoveAll("results")
+		resultsDir := os.Getenv("IDSS_CLIENT_RESULTS_DIR")
+		if resultsDir == "" {
+			resultsDir = "results"
+		}
+		err := os.RemoveAll(resultsDir)
 		if err != nil {
 			log.Error("Error cleaning up results directory:", err)
 		}
